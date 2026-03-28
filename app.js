@@ -74,7 +74,7 @@ const GROUP_CHAT_IDS = [
   -1003378109615, -1003293673373, -1003203365614, -1000000000009, -1000000000010
 ];
 const BACKUP_GROUP_ID = -1003293673373;
-const WEB_APP_URL = 'https://www.huiying888.xyz';
+const WEB_APP_URL = 'https://www.huiying8.netlify.app';
 const AUTH_FILE = './authorized.json';
 
 const TEXTS = {
