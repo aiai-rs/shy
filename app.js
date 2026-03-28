@@ -184,8 +184,15 @@ const rateLimit = require('express-rate-limit');
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, message: { success: false, msg: "尝试次数过多，请15分钟后再试" }, standardHeaders: true, legacyHeaders: false });
 const apiLimiter = rateLimit({ windowMs: 1 * 60 * 1000, max: 200, standardHeaders: true, legacyHeaders: false });
 
-app.use(cors({ origin: '*', methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], allowedHeaders: ['Content-Type', 'Authorization', 'Accept'] }));
-app.options('*', cors());
+app.use(cors());
+app.use((req, res, next) => {
+    const start = Date.now();
+    res.on('finish', () => {
+        const duration = Date.now() - start;
+        console.log(`${new Date().toLocaleString()} | ${req.method} ${req.url} | Status: ${res.statusCode} | ${duration}ms`);
+    });
+    next();
+});
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 app.use(express.static('public'));
@@ -218,19 +225,21 @@ const pool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorize
 
 const initDB = async () => {
     try {
+        console.log("正在尝试连接数据库: " + DATABASE_URL);
         const client = await pool.connect();
+        console.log("数据库连接成功，开始初始化表结构...");
         await client.query(`CREATE TABLE IF NOT EXISTS users (id BIGINT PRIMARY KEY, contact TEXT NOT NULL, password TEXT NOT NULL, balance NUMERIC(10, 4) DEFAULT 0, invite_code TEXT, invited_by BIGINT, source TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
         await client.query(`CREATE TABLE IF NOT EXISTS orders (order_id TEXT PRIMARY KEY, user_id BIGINT, product_name TEXT, payment_method TEXT, usdt_amount NUMERIC(10, 4), cny_amount NUMERIC(10, 2), status TEXT DEFAULT '待支付', shipping_info TEXT, tracking_number TEXT, qrcode_url TEXT, proof TEXT, wallet TEXT, source TEXT, image_url TEXT, quantity INT DEFAULT 1, expires_at TIMESTAMP, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
-        try { await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS image_url TEXT"); await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS wallet TEXT"); await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS source TEXT"); await client.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS source TEXT"); } catch(e){}
+        try { await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS image_url TEXT"); await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS wallet TEXT"); await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS source TEXT"); await client.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS source TEXT"); } catch(e){ console.error("扩展字段失败:", e.message); }
         await client.query(`CREATE TABLE IF NOT EXISTS withdrawals (id SERIAL PRIMARY KEY, user_id BIGINT, amount NUMERIC(10, 4), address TEXT, status TEXT DEFAULT '处理中', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
         await client.query(`CREATE TABLE IF NOT EXISTS products (id BIGINT PRIMARY KEY, name TEXT NOT NULL, price NUMERIC(10, 2) NOT NULL, stock INT DEFAULT 0, category TEXT, type TEXT, description TEXT, image_url TEXT, is_pinned BOOLEAN DEFAULT FALSE);`);
         await client.query(`CREATE TABLE IF NOT EXISTS hiring (id SERIAL PRIMARY KEY, title TEXT, content TEXT, contact TEXT);`);
         await client.query(`CREATE TABLE IF NOT EXISTS chats (id SERIAL PRIMARY KEY, session_id TEXT NOT NULL, sender TEXT, content TEXT, msg_type TEXT, source TEXT, is_read BOOLEAN DEFAULT FALSE, is_initiate BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
-        try { await client.query("ALTER TABLE chats ADD COLUMN IF NOT EXISTS msg_type TEXT"); await client.query("ALTER TABLE chats ADD COLUMN IF NOT EXISTS source TEXT"); } catch(e){}
+        try { await client.query("ALTER TABLE chats ADD COLUMN IF NOT EXISTS msg_type TEXT"); await client.query("ALTER TABLE chats ADD COLUMN IF NOT EXISTS source TEXT"); } catch(e){ console.error("扩展聊天字段失败:", e.message); }
         await client.query(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);`);
         await client.query(`CREATE TABLE IF NOT EXISTS categories (name TEXT PRIMARY KEY, priority INT DEFAULT 0);`);
         await client.query(`CREATE TABLE IF NOT EXISTS balance_logs (id SERIAL PRIMARY KEY, user_id BIGINT, type TEXT, amount NUMERIC(10, 4), remark TEXT, balance_after NUMERIC(10, 4), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
-        try { await client.query("ALTER TABLE balance_logs ADD COLUMN IF NOT EXISTS balance_after NUMERIC(10, 4)"); } catch(e){}
+        try { await client.query("ALTER TABLE balance_logs ADD COLUMN IF NOT EXISTS balance_after NUMERIC(10, 4)"); } catch(e){ console.error("扩展日志字段失败:", e.message); }
 
         const defaults = [['rate', '7.0'], ['feeRate', '0'], ['announcement', '欢迎来到 NEXUS 商城'], ['popup', 'true'], ['walletAddress', '请联系客服获取地址']];
         for (const [k, v] of defaults) {
@@ -238,7 +247,10 @@ const initDB = async () => {
         }
         console.log("✅ 数据库表结构初始化完成");
         client.release();
-    } catch (err) { console.error("❌ 数据库初始化失败:", err); }
+    } catch (err) { 
+        console.error("❌ 数据库初始化崩溃详情:");
+        console.error(err);
+    }
 };
 
 // ==========================================
@@ -986,14 +998,32 @@ app.get('/api/public/data', async (req, res) => {
     try {
         const prods = await pool.query('SELECT * FROM products ORDER BY is_pinned DESC, id DESC');
         const hiring = await pool.query('SELECT * FROM hiring');
-        const rate = await getSetting('rate'); const feeRate = await getSetting('feeRate'); const announcement = await getSetting('announcement');
-        const popup = await getSetting('popup'); const wallet = await getSetting('walletAddress');
+        const rate = await getSetting('rate');
+        const feeRate = await getSetting('feeRate');
+        const announcement = await getSetting('announcement');
+        const popup = await getSetting('popup');
+        const wallet = await getSetting('walletAddress');
         const distinctCats = [...new Set(prods.rows.map(p => p.category))];
         const prioritiesRes = await pool.query('SELECT name, priority FROM categories');
-        const pMap = {}; prioritiesRes.rows.forEach(r => pMap[r.name] = r.priority);
+        const pMap = {};
+        prioritiesRes.rows.forEach(r => pMap[r.name] = r.priority);
         const categories = distinctCats.sort((a, b) => (pMap[b] || 0) - (pMap[a] || 0));
-        res.json({ products: prods.rows, categories, hiring: hiring.rows, rate: parseFloat(rate), feeRate: parseFloat(feeRate), announcement, showPopup: popup === 'true', wallet });
-    } catch(e) { res.status(500).json({error: e.message}); }
+        res.json({
+            success: true,
+            products: prods.rows,
+            categories,
+            hiring: hiring.rows,
+            rate: parseFloat(rate || 0),
+            feeRate: parseFloat(feeRate || 0),
+            announcement: announcement || "暂无公告",
+            showPopup: popup === 'true',
+            wallet: wallet || ""
+        });
+    } catch (e) {
+        console.error("❌ 接口 /api/public/data 报错:");
+        console.error(e);
+        res.status(500).json({ success: false, error: e.message });
+    }
 });
 
 app.post('/api/admin/login', async (req, res) => {
