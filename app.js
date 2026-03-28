@@ -1495,11 +1495,24 @@ const startServer = async () => {
         console.log("⏳ 1. 正在初始化商城数据库...");
         await initDB(); 
 
-        console.log("⏳ 2. 正在启动 Telegram 机器人...");
-        bot.launch({ dropPendingUpdates: true });
-
-        server.listen(PORT, () => { console.log(`🚀 聚合版 Server 运行于端口 ${PORT}`); });
-    } catch (error) { console.error("❌ 启动失败:", error); }
+        server.listen(PORT, () => { 
+            console.log(`🚀 聚合版 Server 运行于端口 ${PORT}`); 
+            
+            console.log("⏳ 2. 正在启动 Telegram 机器人...");
+            bot.launch({ dropPendingUpdates: true })
+                .then(() => {
+                    console.log("✅ Telegram 机器人启动成功");
+                })
+                .catch((err) => {
+                    console.error("⚠️ Telegram 机器人启动失败 (409 冲突或其他原因):");
+                    console.error(err.message);
+                    console.log("💡 机器人启动失败不影响网页 API 运行");
+                });
+        });
+    } catch (error) { 
+        console.error("❌ 核心服务器启动失败:");
+        console.error(error);
+    }
 };
 
 startServer();
