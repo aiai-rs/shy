@@ -1,0 +1,67 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ==========================================
+// 客服系统的用户表 (底层映射为 chat_users)
+// ==========================================
+model User {
+  id        String    @id
+  bossId    String?
+  source    String?
+  isBlocked Boolean   @default(false)
+  isMuted   Boolean   @default(false)
+  messages  Message[]
+  pushSubs  PushSubscription[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  // 核心魔法：在数据库中创建名为 chat_users 的表，避开商城的 users 表！
+  @@map("chat_users") 
+}
+
+// ==========================================
+// 客服系统的消息表 (底层映射为 chat_messages)
+// ==========================================
+model Message {
+  id         Int      @id @default(autoincrement())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  content    String
+  type       String   @default("text")
+  isFromUser Boolean
+  status     String   @default("sent")
+  createdAt  DateTime @default(now())
+
+  // 核心魔法：在数据库中创建名为 chat_messages 的表，避开商城的 chats 表！
+  @@map("chat_messages")
+}
+
+// ==========================================
+// 推送订阅表
+// ==========================================
+model PushSubscription {
+  id        Int      @id @default(autoincrement())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  endpoint  String   @unique
+  keys      Json
+  createdAt DateTime @default(now())
+
+  @@map("chat_push_subs")
+}
+
+// ==========================================
+// 全局配置表
+// ==========================================
+model GlobalConfig {
+  key   String @id
+  value String
+
+  @@map("chat_global_configs")
+}
