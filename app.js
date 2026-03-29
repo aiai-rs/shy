@@ -195,6 +195,7 @@ app.use((req, res, next) => {
 });
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
+app.use(express.raw({ type: 'application/octet-stream', limit: '10mb' })); 
 app.use(express.static('public'));
 
 if (!fs.existsSync('uploads')) fs.mkdirSync('uploads');
