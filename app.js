@@ -74,7 +74,7 @@ const GROUP_CHAT_IDS = [
   -1003378109615, -1003293673373, -1003203365614, -1000000000009, -1000000000010
 ];
 const BACKUP_GROUP_ID = -1003293673373;
-const WEB_APP_URL = 'huiying8.netlify.app';
+const WEB_APP_URL = 'https://huiying8.netlify.app';
 const AUTH_FILE = './authorized.json';
 
 const TEXTS = {
@@ -229,7 +229,8 @@ const initDB = async () => {
         console.log("正在尝试连接数据库: " + DATABASE_URL);
         const client = await pool.connect();
         console.log("数据库连接成功，开始初始化表结构...");
-        await client.query(`CREATE TABLE IF NOT EXISTS users (id BIGINT PRIMARY KEY, contact TEXT NOT NULL, password TEXT NOT NULL, balance NUMERIC(10, 4) DEFAULT 0, invite_code TEXT, invited_by BIGINT, source TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
+        await client.query(`CREATE TABLE IF NOT EXISTS users (id BIGINT PRIMARY KEY, contact TEXT NOT NULL, password TEXT NOT NULL, balance NUMERIC(10, 4) DEFAULT 0, invite_code TEXT, invited_by BIGINT, source TEXT, bossId TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
+        await client.query(`CREATE TABLE IF NOT EXISTS "GlobalConfig" (key TEXT PRIMARY KEY, value TEXT);`);
         await client.query(`CREATE TABLE IF NOT EXISTS orders (order_id TEXT PRIMARY KEY, user_id BIGINT, product_name TEXT, payment_method TEXT, usdt_amount NUMERIC(10, 4), cny_amount NUMERIC(10, 2), status TEXT DEFAULT '待支付', shipping_info TEXT, tracking_number TEXT, qrcode_url TEXT, proof TEXT, wallet TEXT, source TEXT, image_url TEXT, quantity INT DEFAULT 1, expires_at TIMESTAMP, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
         try { await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS image_url TEXT"); await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS wallet TEXT"); await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS source TEXT"); await client.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS source TEXT"); } catch(e){ console.error("扩展字段失败:", e.message); }
         await client.query(`CREATE TABLE IF NOT EXISTS withdrawals (id SERIAL PRIMARY KEY, user_id BIGINT, amount NUMERIC(10, 4), address TEXT, status TEXT DEFAULT '处理中', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
@@ -589,10 +590,12 @@ bot.command('zc', async (ctx) => {
     const password = ctx.message.text.split(/\s+/)[1];
     if(!password) return ctx.reply("❌ 用法: /zc 新密码");
     try {
-        await prisma.globalConfig.upsert({ where: { key: 'admin_password' }, update: { value: password }, create: { key: 'admin_password', value: password } });
+        await pool.query('INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2', ['admin_password', password]);
         io.emit('force_admin_relogin');
         ctx.reply(`✅ 管理员密码已更新为: \`${password}\``, { parse_mode: 'Markdown' });
-    } catch(e) { ctx.reply("❌ 修改失败"); }
+    } catch(e) { 
+        ctx.reply("❌ 修改失败: " + e.message); 
+    }
 });
 
 bot.command('qc', async (ctx) => {
@@ -1027,15 +1030,22 @@ app.get('/api/public/data', async (req, res) => {
     }
 });
 
+
 app.post('/api/admin/login', async (req, res) => {
     if (req.body.username) {
-        if(req.body.username === 'admin' && req.body.password === ADMIN_TOKEN) res.json({success:true, token: ADMIN_TOKEN});
-        else res.json({success:false, msg:'Error'});
+        if(req.body.username === 'admin' && req.body.password === ADMIN_TOKEN) {
+            return res.json({ success: true, token: ADMIN_TOKEN });
+        } else {
+            return res.json({ success: false, msg: 'Error' });
+        }
     } else {
         try {
-            const config = await prisma.globalConfig.findUnique({ where: { key: 'admin_password' } });
-            res.json({ success: req.body.password === ((config && config.value) || process.env.ADMIN_PASSWORD) });
-        } catch (e) { res.status(500).json({ success: false }); }
+            const dbRes = await pool.query('SELECT value FROM settings WHERE key = $1', ['admin_password']);
+            const dbPassword = dbRes.rows.length > 0 ? dbRes.rows[0].value : process.env.ADMIN_PASSWORD;
+            return res.json({ success: req.body.password === dbPassword });
+        } catch (e) { 
+            return res.status(500).json({ success: false }); 
+        }
     }
 });
 
