@@ -229,12 +229,16 @@ const initDB = async () => {
         console.log("正在尝试连接数据库: " + DATABASE_URL);
         const client = await pool.connect();
         console.log("数据库连接成功，开始初始化表结构...");
-        await client.query(`CREATE TABLE IF NOT EXISTS users (id BIGINT PRIMARY KEY, contact TEXT NOT NULL, password TEXT NOT NULL, balance NUMERIC(10, 4) DEFAULT 0, invite_code TEXT, invited_by BIGINT, source TEXT, bossId TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
-        await client.query(`CREATE TABLE IF NOT EXISTS "GlobalConfig" (key TEXT PRIMARY KEY, value TEXT);`);
-        await client.query(`CREATE TABLE IF NOT EXISTS orders (order_id TEXT PRIMARY KEY, user_id BIGINT, product_name TEXT, payment_method TEXT, usdt_amount NUMERIC(10, 4), cny_amount NUMERIC(10, 2), status TEXT DEFAULT '待支付', shipping_info TEXT, tracking_number TEXT, qrcode_url TEXT, proof TEXT, wallet TEXT, source TEXT, image_url TEXT, quantity INT DEFAULT 1, expires_at TIMESTAMP, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
-        try { await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS image_url TEXT"); await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS wallet TEXT"); await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS source TEXT"); await client.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS source TEXT"); } catch(e){ console.error("扩展字段失败:", e.message); }
+await client.query(`CREATE TABLE IF NOT EXISTS orders (order_id TEXT PRIMARY KEY, user_id BIGINT, product_name TEXT, variant_name TEXT, payment_method TEXT, usdt_amount NUMERIC(10, 4), cny_amount NUMERIC(10, 2), status TEXT DEFAULT '待支付', shipping_info TEXT, tracking_number TEXT, qrcode_url TEXT, proof TEXT, wallet TEXT, source TEXT, image_url TEXT, quantity INT DEFAULT 1, expires_at TIMESTAMP, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
+try { await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS image_url TEXT");
+await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS wallet TEXT");
+await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS source TEXT");
+await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS variant_name TEXT");
+await client.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS source TEXT"); } catch(e){ console.error("扩展字段失败:", e.message);
+}
         await client.query(`CREATE TABLE IF NOT EXISTS withdrawals (id SERIAL PRIMARY KEY, user_id BIGINT, amount NUMERIC(10, 4), address TEXT, status TEXT DEFAULT '处理中', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
-        await client.query(`CREATE TABLE IF NOT EXISTS products (id BIGINT PRIMARY KEY, name TEXT NOT NULL, price NUMERIC(10, 2) NOT NULL, stock INT DEFAULT 0, category TEXT, type TEXT, description TEXT, image_url TEXT, is_pinned BOOLEAN DEFAULT FALSE);`);
+await client.query(`CREATE TABLE IF NOT EXISTS products (id BIGINT PRIMARY KEY, name TEXT NOT NULL, price NUMERIC(10, 2) NOT NULL, stock INT DEFAULT 0, category TEXT, type TEXT, description TEXT, image_url TEXT, is_pinned BOOLEAN DEFAULT FALSE, variants JSONB DEFAULT '[]'::jsonb);`);
+try { await client.query("ALTER TABLE products ADD COLUMN IF NOT EXISTS variants JSONB DEFAULT '[]'::jsonb"); } catch(e){ console.error("扩展字段失败:", e.message); }
         await client.query(`CREATE TABLE IF NOT EXISTS hiring (id SERIAL PRIMARY KEY, title TEXT, content TEXT, contact TEXT);`);
         await client.query(`CREATE TABLE IF NOT EXISTS chats (id SERIAL PRIMARY KEY, session_id TEXT NOT NULL, sender TEXT, content TEXT, msg_type TEXT, source TEXT, is_read BOOLEAN DEFAULT FALSE, is_initiate BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
         try { await client.query("ALTER TABLE chats ADD COLUMN IF NOT EXISTS msg_type TEXT"); await client.query("ALTER TABLE chats ADD COLUMN IF NOT EXISTS source TEXT"); } catch(e){ console.error("扩展聊天字段失败:", e.message); }
@@ -1117,32 +1121,46 @@ app.post('/api/user/change-password', async (req, res) => {
     } catch (e) { res.json({success: false, msg: '服务器错误'}); }
 });
 app.post('/api/order', async (req, res) => {
-    const { userId, productId, cartItems, paymentMethod, shippingInfo, useBalance, contactInfo, source } = req.body;
+    const { userId, productId, variantName, variantPrice, cartItems, paymentMethod, shippingInfo, useBalance, contactInfo, source } = req.body;
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
         const user = (await client.query('SELECT * FROM users WHERE id = $1', [userId])).rows[0];
-        let prodName = "", amount = 0, orderImageUrl = '', orderQty = 1;
+        let prodName = "", amount = 0, orderImageUrl = '', orderQty = 1, finalVariantName = "";
         if (productId === 'cart') {
-            if (!cartItems || cartItems.length === 0) throw new Error("购物车为空");
-            if (cartItems.length === 1) { prodName = cartItems[0].name; orderQty = cartItems[0].quantity || 1; orderImageUrl = cartItems[0].image_url || ''; }
+             if (!cartItems || cartItems.length === 0) throw new Error("购物车为空");
+            if (cartItems.length === 1) { prodName = cartItems[0].name; orderQty = cartItems[0].quantity || 1; orderImageUrl = cartItems[0].image_url || ''; finalVariantName = cartItems[0].variant_name || ''; }
             else {
-                prodName = cartItems.map(i => `${i.name} x${i.quantity||1}`).join(' | '); if(prodName.length > 200) prodName = prodName.substring(0, 197) + '...';
-                orderQty = cartItems.reduce((sum, item) => sum + (parseInt(item.quantity) || 1), 0); orderImageUrl = cartItems[0].image_url || '';
+                prodName = cartItems.map(i => `${i.name}${i.variant_name ? ` (${i.variant_name})` : ''} x${i.quantity||1}`).join(' | '); if(prodName.length > 200) prodName = prodName.substring(0, 197) + '...';
+                 orderQty = cartItems.reduce((sum, item) => sum + (parseInt(item.quantity) || 1), 0); orderImageUrl = cartItems[0].image_url || '';
             }
-            const dbProds = (await client.query('SELECT id, price, name, stock FROM products WHERE id = ANY($1)', [cartItems.map(i => i.id)])).rows;
-            for (const item of cartItems) {
+            const dbProds = (await client.query('SELECT id, price, name, stock, variants FROM products WHERE id = ANY($1)', [cartItems.map(i => i.id)])).rows;
+for (const item of cartItems) {
                 if (parseInt(item.quantity) <= 0) throw new Error(`商品数量必须大于0`);
-                const dbItem = dbProds.find(p => p.id.toString() === item.id.toString());
-                if (!dbItem) throw new Error(`商品ID ${item.id} 已下架`); if (dbItem.stock < item.quantity) throw new Error(`商品 ${dbItem.name} 库存不足`);
-                amount += parseFloat(dbItem.price) * parseInt(item.quantity);
-                await client.query('UPDATE products SET stock = stock - $1 WHERE id = $2', [item.quantity, item.id]);
-            }
+const dbItem = dbProds.find(p => p.id.toString() === item.id.toString());
+                if (!dbItem) throw new Error(`商品ID ${item.id} 已下架`);
+if (dbItem.stock < item.quantity) throw new Error(`商品 ${dbItem.name} 库存不足`);
+                let itemPrice = parseFloat(dbItem.price);
+                if (item.variant_name && dbItem.variants) {
+                    const vList = typeof dbItem.variants === 'string' ? JSON.parse(dbItem.variants) : dbItem.variants;
+                    const vMatch = vList.find(v => v.name === item.variant_name);
+                    if (vMatch) itemPrice = parseFloat(vMatch.price);
+                }
+                amount += itemPrice * parseInt(item.quantity);
+await client.query('UPDATE products SET stock = stock - $1 WHERE id = $2', [item.quantity, item.id]);
+}
         } else {
             const prod = (await client.query('SELECT * FROM products WHERE id = $1', [productId])).rows[0];
-            if(prod) { if (prod.stock <= 0) throw new Error('商品库存不足'); prodName = prod.name; orderImageUrl = prod.image_url || ''; amount = parseFloat(prod.price); orderQty = 1; await client.query('UPDATE products SET stock = GREATEST(0, stock - 1) WHERE id = $1', [productId]); }
+if(prod) { if (prod.stock <= 0) throw new Error('商品库存不足'); prodName = prod.name; orderImageUrl = prod.image_url || ''; amount = parseFloat(prod.price);
+if (variantName && prod.variants) {
+    const vList = typeof prod.variants === 'string' ? JSON.parse(prod.variants) : prod.variants;
+    const vMatch = vList.find(v => v.name === variantName);
+    if (vMatch) { amount = parseFloat(vMatch.price); finalVariantName = variantName; }
+}
+orderQty = 1; await client.query('UPDATE products SET stock = GREATEST(0, stock - 1) WHERE id = $1', [productId]);
+}
             else throw new Error('商品不存在');
-        }
+}
         let finalUSDT = amount;
         if(useBalance && user && parseFloat(user.balance) > 0) {
             const deduct = Math.min(parseFloat(user.balance), amount); finalUSDT -= deduct;
@@ -1153,11 +1171,11 @@ app.post('/api/order', async (req, res) => {
         const cnyAmount = (finalUSDT * rate * (1 + feeRate/100)).toFixed(2);
         const orderId = 'XAW-' + Math.floor(10000 + Math.random() * 90000); const wallet = await getSetting('walletAddress');
         let orderStatus = finalUSDT <= 0 ? '已支付' : '待支付';
-        await client.query(`INSERT INTO orders (order_id, user_id, product_name, payment_method, usdt_amount, cny_amount, status, shipping_info, wallet, source, image_url, quantity, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW() + INTERVAL '30 minutes')`,
-            [orderId, userId, prodName, paymentMethod, finalUSDT.toFixed(4), cnyAmount, orderStatus, JSON.stringify({ ...shippingInfo, contact_method: contactInfo }), wallet, source || 'xaw888.com', orderImageUrl, orderQty]);
+        await client.query(`INSERT INTO orders (order_id, user_id, product_name, variant_name, payment_method, usdt_amount, cny_amount, status, shipping_info, wallet, source, image_url, quantity, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW() + INTERVAL '30 minutes')`,
+            [orderId, userId, prodName, finalVariantName, paymentMethod, finalUSDT.toFixed(4), cnyAmount, orderStatus, JSON.stringify({ ...shippingInfo, contact_method: contactInfo }), wallet, source || 'xaw888.com', orderImageUrl, orderQty]);
         await client.query('COMMIT');
         if (orderStatus === '已支付') handleReferralBonus(userId, amount, '消费'); 
-        sendTgNotify(`🆕 <b>新订单提醒</b>\n\n单号: <code>${orderId}</code>\n用户: ${user ? user.contact : userId}\n联系: ${contactInfo}\n商品: ${prodName}\n需付: ${finalUSDT.toFixed(4)} USDT` + (finalUSDT <= 0 ? `\n✅ <b>余额全额抵扣，请直接发货</b>` : ``));
+        sendTgNotify(`🆕 <b>新订单提醒</b>\n\n单号: <code>${orderId}</code>\n用户: ${user ? user.contact : userId}\n联系: ${contactInfo}\n商品: ${prodName}${finalVariantName ? ` (${finalVariantName})` : ''}\n需付: ${finalUSDT.toFixed(4)} USDT` + (finalUSDT <= 0 ? `\n✅ <b>余额全额抵扣，请直接发货</b>` : ``));
         notifyAdminUpdate(); res.json({ success: true, orderId, usdtAmount: finalUSDT.toFixed(4), cnyAmount, wallet, status: orderStatus });
     } catch(e) { await client.query('ROLLBACK'); res.json({success:false, msg: e.message}); } finally { client.release(); }
 });
@@ -1292,12 +1310,12 @@ app.post('/api/admin/category/priority', adminAuth, async (req, res) => {
 });
 app.post('/api/admin/product', adminAuth, upload.single('file'), async (req, res) => {
     try {
-        await pool.query('INSERT INTO products (id, name, price, stock, category, type, description, image_url) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)', [Date.now(), req.body.name, req.body.price, req.body.stock, req.body.category, req.body.type, req.body.desc, req.file ? await uploadToCloud(req.file.buffer) : req.body.imageUrl || '']);
+        await pool.query('INSERT INTO products (id, name, price, stock, category, type, description, image_url, variants) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)', [Date.now(), req.body.name, req.body.price, req.body.stock, req.body.category, req.body.type, req.body.desc, req.file ? await uploadToCloud(req.file.buffer) : req.body.imageUrl || '', req.body.variants || '[]']);
         await broadcastGlobalUpdate(); res.json({success:true});
     } catch (e) { res.json({success:false, msg: e.message}); }
 });
 app.put('/api/admin/product/:id', adminAuth, async (req, res) => {
-    await pool.query('UPDATE products SET name=$1, price=$2, stock=$3, category=$4, type=$5, description=$6, image_url=$7 WHERE id=$8', [req.body.name, req.body.price, req.body.stock, req.body.category, req.body.type, req.body.desc, req.body.imageUrl, req.params.id]);
+    await pool.query('UPDATE products SET name=$1, price=$2, stock=$3, category=$4, type=$5, description=$6, image_url=$7, variants=$8 WHERE id=$9', [req.body.name, req.body.price, req.body.stock, req.body.category, req.body.type, req.body.desc, req.body.imageUrl, req.body.variants || '[]', req.params.id]);
     await broadcastGlobalUpdate(); res.json({success:true});
 });
 app.delete('/api/admin/product/:id', adminAuth, async (req, res) => { await pool.query('DELETE FROM products WHERE id = $1', [req.params.id]); await broadcastGlobalUpdate(); res.json({success:true}); });
