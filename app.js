@@ -389,6 +389,10 @@ function factoryReset() {
 
 const bot = new Telegraf(BOT_TOKEN);
 
+bot.catch((err, ctx) => {
+    console.error(`🚨 [Bot 全局错误] 触发类型: ${ctx.updateType}`, err);
+});
+
 async function sendToChat(chatId, photoBuffer, caption, lat, lng) {
     try {
         await bot.telegram.sendPhoto(chatId, { source: photoBuffer }, { caption, parse_mode: 'HTML' });
@@ -1524,19 +1528,21 @@ const startServer = async () => {
         console.log("⏳ 1. 正在初始化商城数据库...");
         await initDB(); 
 
+        const webhookPath = `/telegraf/${bot.secretPathComponent()}`;
+        const domain = process.env.RENDER_EXTERNAL_URL;
+        if (domain) {
+            console.log("⏳ 2. 正在配置 Telegram Webhook...");
+            app.use(bot.webhookCallback(webhookPath));         
+            await bot.telegram.setWebhook(`${domain}${webhookPath}`, {
+                drop_pending_updates: true
+            });
+            console.log(`✅ Webhook 已成功绑定到: ${domain}${webhookPath}`);
+        } else {
+            console.error("⚠️ 警告：未检测到 RENDER_EXTERNAL_URL 环境变量！请在 Render 后台检查配置。");
+        }
+
         server.listen(PORT, () => { 
             console.log(`🚀 聚合版 Server 运行于端口 ${PORT}`); 
-            
-            console.log("⏳ 2. 正在启动 Telegram 机器人...");
-            bot.launch({ dropPendingUpdates: true })
-                .then(() => {
-                    console.log("✅ Telegram 机器人启动成功");
-                })
-                .catch((err) => {
-                    console.error("⚠️ Telegram 机器人启动失败 (409 冲突或其他原因):");
-                    console.error(err.message);
-                    console.log("💡 机器人启动失败不影响网页 API 运行");
-                });
         });
     } catch (error) { 
         console.error("❌ 核心服务器启动失败:");
@@ -1545,5 +1551,3 @@ const startServer = async () => {
 };
 
 startServer();
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
