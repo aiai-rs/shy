@@ -1355,6 +1355,21 @@ app.post('/api/admin/product/pin/:id', adminAuth, async (req, res) => {
         await broadcastGlobalUpdate(); notifyAdminUpdate(); res.json({ success: true, is_pinned: !productRes.rows[0].is_pinned });
     } catch (e) { res.status(500).json({ success: false, msg: e.message }); }
 });
+
+// [新增] 一键补库存接口
+app.post('/api/admin/product/restock_all', adminAuth, async (req, res) => {
+    try {
+        const amount = parseInt(req.body.amount) || 999;
+        // 把所有商品的库存统一修改为传入的数值
+        await pool.query('UPDATE products SET stock = $1', [amount]);
+        // 广播给所有用户，前端库存瞬间填满
+        await broadcastGlobalUpdate(); 
+        res.json({success: true});
+    } catch (e) { 
+        res.status(500).json({success: false, msg: e.message}); 
+    }
+});
+
 app.post('/api/admin/update/hiring', adminAuth, async (req, res) => {
     await pool.query('TRUNCATE hiring'); for (const job of req.body) await pool.query('INSERT INTO hiring (title, content, contact) VALUES ($1, $2, $3)', [job.title, job.content, job.contact]);
     await broadcastGlobalUpdate(); res.json({success:true});
@@ -1547,8 +1562,24 @@ io.on('connection', (socket) => {
 // [8] 定時任務與啟動
 // ==========================================
 
+// 每 90 分钟自动随机扣除库存，并通过 WebSocket 广播给所有用户
 setInterval(async () => {
-    try { await pool.query(`UPDATE products SET stock = GREATEST(0, stock - floor(random() * 5 + 1)::int) WHERE stock > 0`); broadcastGlobalUpdate(); } catch(e) {}
+    try { 
+        console.log("⏱️ [定时任务] 90分钟触发：准备模拟真实销量，随机扣除商品库存...");
+        
+        // 执行数据库扣除，并返回被修改的商品数量
+        const result = await pool.query(`UPDATE products SET stock = GREATEST(0, stock - floor(random() * 5 + 1)::int) WHERE stock > 0 RETURNING id`); 
+        
+        if (result.rowCount > 0) {
+            console.log(`✅ [WebSocket 广播] 已成功随机扣除 ${result.rowCount} 个商品的库存，正在通过 Socket.IO 瞬间推送给所有在线用户！`);
+            // 这里就是 WebSocket 广播的核心调用
+            broadcastGlobalUpdate(); 
+        } else {
+            console.log("ℹ️ [定时任务] 当前所有商品已售罄（库存为 0），无需扣除和广播。");
+        }
+    } catch(e) { 
+        console.error("❌ [定时任务] 随机扣除库存失败:", e.message); 
+    }
 }, 90 * 60 * 1000); 
 
 cron.schedule('0 0 * * *', async () => {
