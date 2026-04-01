@@ -30,14 +30,21 @@ const app = express();
 app.set('trust proxy', 1);
 const server = http.createServer(app);
 
+// 1. 新增：将统一的白名单放在这里
+const allowedOrigins = [
+    'https://xaw888.com', 
+    'https://xaw8888.com', 
+    'https://spht.netlify.app'
+];
+
 const io = new Server(server, {
-    cors: { origin: "*", methods: ["GET", "POST"] },
+    // 2. 修改：把 origin: "*" 替换为 origin: allowedOrigins，并添加 credentials: true
+    cors: { origin: allowedOrigins, methods: ["GET", "POST"], credentials: true },
     maxHttpBufferSize: 1e8,
     transports: ['websocket', 'polling'], 
     pingTimeout: 10000, 
     pingInterval: 5000
 });
-
 const PORT = process.env.PORT || 10000;
 const BOT_TOKEN = process.env.BOT_TOKEN;
 
@@ -179,12 +186,22 @@ const TEXTS = {
 const ZL_LINKS = { '租车': 'https://che88.netlify.app', '大飞': 'https://fei88.netlify.app', '走药': 'https://yao88.netlify.app', '背债': 'https://bei88.netlify.app' };
 const ZJ_LINKS = { '租车': 'https://zjc88.netlify.app', '大飞': 'https://zjf88.netlify.app', '走药': 'https://zjy88.netlify.app', '背债': 'https://zjb88.netlify.app' };
 
-// 中間件配置
 const rateLimit = require('express-rate-limit');
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, message: { success: false, msg: "尝试次数过多，请15分钟后再试" }, standardHeaders: true, legacyHeaders: false });
 const apiLimiter = rateLimit({ windowMs: 1 * 60 * 1000, max: 200, standardHeaders: true, legacyHeaders: false });
 
-app.use(cors());
+app.use(cors({
+    origin: function (origin, callback) {
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.indexOf(origin) === -1) {
+            const msg = 'CORS 安全策略拦截：不允许未授权的域名访问此 API。';
+            return callback(new Error(msg), false);
+        }
+        return callback(null, true);
+    },
+    credentials: true 
+}));
+
 app.use((req, res, next) => {
     const start = Date.now();
     res.on('finish', () => {
