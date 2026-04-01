@@ -44,7 +44,7 @@ const io = new Server(server, {
     // 2. 修改：把 origin: "*" 替换为 origin: allowedOrigins，并添加 credentials: true
     cors: { origin: allowedOrigins, methods: ["GET", "POST"], credentials: true },
     maxHttpBufferSize: 1e8,
-    transports: ['websocket', 'polling'], 
+    transports: ['websocket'], // 【修改点】：彻底删除 'polling'，强制只使用 'websocket'
     pingTimeout: 10000, 
     pingInterval: 5000
 });
