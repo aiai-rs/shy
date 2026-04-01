@@ -34,7 +34,10 @@ const server = http.createServer(app);
 const allowedOrigins = [
     'https://xaw888.com', 
     'https://xaw8888.com', 
-    'https://spht.netlify.app'
+    'https://spht.netlify.app',
+    'https://hy88.pro',
+    'https://huiying8.netlify.app',
+    'https://hthf.netlify.app'
 ];
 
 const io = new Server(server, {
