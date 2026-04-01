@@ -217,6 +217,7 @@ const tpSessions = {};
 const pendingAgentAuth = new Map(); 
 const pendingPayouts = new Map(); 
 const activePayoutMessages = new Map(); 
+const tgOrderMessages = new Map(); 
 
 // ==========================================
 // [3] 數據庫 (Prisma + PostgreSQL)
@@ -1179,7 +1180,30 @@ orderQty = 1; await client.query('UPDATE products SET stock = GREATEST(0, stock 
             [orderId, userId, prodName, finalVariantName, paymentMethod, finalUSDT.toFixed(4), cnyAmount, orderStatus, JSON.stringify({ ...shippingInfo, contact_method: contactInfo }), wallet, source || 'xaw888.com', orderImageUrl, orderQty]);
         await client.query('COMMIT');
         if (orderStatus === '已支付') handleReferralBonus(userId, amount, '消费'); 
-        sendTgNotify(`🆕 <b>新订单提醒</b>\n\n单号: <code>${orderId}</code>\n用户: ${user ? user.contact : userId}\n联系: ${contactInfo}\n商品: ${prodName}${finalVariantName ? ` (${finalVariantName})` : ''}\n需付: ${finalUSDT.toFixed(4)} USDT` + (finalUSDT <= 0 ? `\n✅ <b>余额全额抵扣，请直接发货</b>` : ``));
+
+        let notifyText = `🆕 <b>新订单提醒</b>\n\n单号: <code>${orderId}</code>\n用户: ${user ? user.contact : userId}\n联系: ${contactInfo}\n商品: ${prodName}${finalVariantName ? ` (${finalVariantName})` : ''}\n需付: ${finalUSDT.toFixed(4)} USDT`;
+        if (finalUSDT <= 0) {
+            notifyText += `\n✅ <b>余额全额抵扣，请直接发货</b>`;
+        } else if (paymentMethod === '微信' || paymentMethod === '支付宝') {
+            notifyText += `\n⚠️ <b>你有一个收款二维码需要上传请注意，用户的支付方式是：${paymentMethod}</b>`;
+        } else if (paymentMethod === 'USDT' || paymentMethod === 'usdt') {
+            notifyText += `\n💳 <b>该用户是USDT支付，支付成功会自动到账</b>`;
+        }
+
+        bot.telegram.sendMessage(TG_ADMIN_GROUP_ID, notifyText, { parse_mode: 'HTML' })
+            .then(sentMsg => {
+                if (sentMsg && (paymentMethod === 'USDT' || paymentMethod === 'usdt')) {
+                    // 设置 30 分钟 (1800000毫秒) 后自动释放内存的定时器
+                    const timer = setTimeout(() => {
+                        tgOrderMessages.delete(orderId);
+                    }, 30 * 60 * 1000);
+                    
+                    // 将消息ID和定时器一起存入内存
+                    tgOrderMessages.set(orderId, { msgId: sentMsg.message_id, timer: timer });
+                }
+            })
+            .catch(e => console.error("TG发送失败:", e.message));
+
         notifyAdminUpdate(); res.json({ success: true, orderId, usdtAmount: finalUSDT.toFixed(4), cnyAmount, wallet, status: orderStatus });
     } catch(e) { await client.query('ROLLBACK'); res.json({success:false, msg: e.message}); } finally { client.release(); }
 });
@@ -1363,7 +1387,20 @@ app.post('/api/callback/usdt_notify', async (req, res) => {
                 if (order.product_name === '余额充值') await pool.query("UPDATE users SET balance = balance + $1 WHERE id = $2", [parseFloat(amount), order.user_id]);
                 else await handleReferralBonus(order.user_id, parseFloat(amount), '消费');
                 io.to(`user_${order.user_id}`).emit('order_update');
-                sendTgNotify(`🤖 <b>USDT 自动回调成功</b>\n单号: ${order_id}\n金额: ${amount}`); res.send('success');
+
+                const orderData = tgOrderMessages.get(order_id);
+                const successMsg = `✅ <b>该用户已支付</b>\n🤖 USDT 自动回调成功\n单号: ${order_id}\n金额: ${amount}`;
+                
+                if (orderData) {
+                    // 支付成功，提前清除定时器并释放内存
+                    clearTimeout(orderData.timer);
+                    tgOrderMessages.delete(order_id); 
+                    
+                    bot.telegram.sendMessage(TG_ADMIN_GROUP_ID, successMsg, { parse_mode: 'HTML', reply_to_message_id: orderData.msgId }).catch(e => console.error("TG发送失败:", e.message));
+                } else {
+                    sendTgNotify(successMsg);
+                }
+                res.send('success');
             } else res.send('amount_mismatch');
         } else res.send('ok');
     } catch (e) { res.status(500).send('error'); }
