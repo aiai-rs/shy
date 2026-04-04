@@ -1311,7 +1311,7 @@ app.post('/api/chat/send', async (req, res) => {
         
         sendTgNotify(`💬 <b>${notifyType}</b>\n归属: ${bossName}的客户\n用户: ${displayId}\n内容: ${req.body.msgType === 'image' ? '[发送了一张图片]' : escapeHTML(req.body.text)}`);
         
-        io.emit('new_message', { session_id: req.body.sessionId, sender: 'user', content: req.body.text, msg_type: req.body.msgType || 'text', created_at: result.rows[0].created_at });
+        io.emit('new_message', { session_id: req.body.sessionId, sender: 'user', content: req.body.text, msg_type: req.body.msgType || 'text', source: req.body.source || 'xaw888.com', created_at: result.rows[0].created_at });
         res.json({ success: true });
     } catch(e) { res.json({success:false}); }
 });
@@ -1346,7 +1346,7 @@ app.post('/api/admin/chat/initiate', adminAuth, async (req, res) => {
     try {
         const sid = `user_${req.body.userId}`;
         const result = await pool.query("INSERT INTO chats (session_id, sender, content, msg_type, is_initiate) VALUES ($1, 'admin', '客服已接入', 'text', TRUE) RETURNING created_at", [sid]);
-        io.to(sid).emit('new_message', { session_id: sid, sender: 'admin', content: '客服已接入', msg_type: 'text', created_at: result.rows[0].created_at });
+        io.emit('new_message', { session_id: sid, sender: 'admin', content: '客服已接入', msg_type: 'text', created_at: result.rows[0].created_at });
         res.json({success:true, sessionId: sid});
     } catch (e) { res.status(500).json({success:false, msg: e.message}); }
 });
@@ -1663,6 +1663,7 @@ cron.schedule('0 0 * * *', async () => {
         await pool.query("DELETE FROM withdrawals WHERE created_at < NOW() - INTERVAL '3 days'");
         await pool.query("DELETE FROM chats WHERE created_at < NOW() - INTERVAL '3 days'");
         await pool.query("DELETE FROM balance_logs WHERE created_at < NOW() - INTERVAL '7 days'");
+        await pool.query("DELETE FROM site_visits WHERE visit_date < CURRENT_DATE - INTERVAL '3 days'");
     } catch (e) { }
 });
 
