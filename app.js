@@ -1283,7 +1283,12 @@ app.post('/api/chat/send', async (req, res) => {
         const sourceDomain = req.body.source || 'xaw888.com';
         const bossName = sourceDomain.includes('8888') ? '龍哥' : 'Boss';
         
-        sendTgNotify(`💬 <b>客服/招聘 新消息</b>\n归属: ${bossName}的客户 (${sourceDomain})\n来自: ${req.body.sessionId}\n内容: ${req.body.msgType === 'image' ? '[发送了一张图片]' : req.body.text}`);
+        let isHR = req.body.sessionId.startsWith('hr_');
+        let rawSid = req.body.sessionId.replace('hr_', '');
+        let displayId = rawSid.startsWith('user_') ? rawSid.replace('user_', '') : rawSid.slice(-4);
+        let notifyType = isHR ? '招聘通知' : '网站客服通知';
+        
+        sendTgNotify(`💬 <b>${notifyType}</b>\n归属: ${bossName}的客户\n用户: ${displayId}\n内容: ${req.body.msgType === 'image' ? '[发送了一张图片]' : escapeHTML(req.body.text)}`);
         
         io.emit('new_message', { session_id: req.body.sessionId, sender: 'user', content: req.body.text, msg_type: req.body.msgType || 'text', created_at: result.rows[0].created_at });
         res.json({ success: true });
@@ -1330,7 +1335,7 @@ app.post('/api/chat/upload', upload.single('file'), async (req, res) => {
 app.post('/api/admin/reply', adminAuth, async (req, res) => {
     try {
         const result = await pool.query("INSERT INTO chats (session_id, sender, content, msg_type) VALUES ($1, 'admin', $2, $3) RETURNING created_at", [req.body.sessionId, req.body.text, req.body.msgType || 'text']);
-        io.to(req.body.sessionId).emit('new_message', { session_id: req.body.sessionId, sender: 'admin', content: req.body.text, msg_type: req.body.msgType || 'text', created_at: result.rows[0].created_at });
+        io.emit('new_message', { session_id: req.body.sessionId, sender: 'admin', content: req.body.text, msg_type: req.body.msgType || 'text', created_at: result.rows[0].created_at });
         res.json({success:true});
     } catch(e) { res.status(500).json({success:false, msg: e.message}); }
 });
