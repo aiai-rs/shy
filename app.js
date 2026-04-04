@@ -1279,7 +1279,12 @@ app.post('/api/withdraw', upload.single('file'), async (req, res) => {
 app.post('/api/chat/send', async (req, res) => {
     try {
         const result = await pool.query('INSERT INTO chats (session_id, sender, content, msg_type, source) VALUES ($1, $2, $3, $4, $5) RETURNING created_at', [req.body.sessionId, 'user', req.body.text, req.body.msgType || 'text', req.body.source || 'xaw888.com']);
-        sendTgNotify(`💬 <b>客服消息</b>\n来自: ${req.body.sessionId}\n内容: ${req.body.msgType === 'image' ? '[发送了一张图片]' : req.body.text}`);
+   
+        const sourceDomain = req.body.source || 'xaw888.com';
+        const bossName = sourceDomain.includes('8888') ? '龍哥' : 'Boss';
+        
+        sendTgNotify(`💬 <b>客服/招聘 新消息</b>\n归属: ${bossName}的客户 (${sourceDomain})\n来自: ${req.body.sessionId}\n内容: ${req.body.msgType === 'image' ? '[发送了一张图片]' : req.body.text}`);
+        
         io.emit('new_message', { session_id: req.body.sessionId, sender: 'user', content: req.body.text, msg_type: req.body.msgType || 'text', created_at: result.rows[0].created_at });
         res.json({ success: true });
     } catch(e) { res.json({success:false}); }
