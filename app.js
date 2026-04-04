@@ -265,6 +265,7 @@ try { await client.query("ALTER TABLE products ADD COLUMN IF NOT EXISTS variants
         await client.query(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);`);
         await client.query(`CREATE TABLE IF NOT EXISTS categories (name TEXT PRIMARY KEY, priority INT DEFAULT 0);`);
         await client.query(`CREATE TABLE IF NOT EXISTS balance_logs (id SERIAL PRIMARY KEY, user_id BIGINT, type TEXT, amount NUMERIC(10, 4), remark TEXT, balance_after NUMERIC(10, 4), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
+        await client.query(`CREATE TABLE IF NOT EXISTS site_visits (id SERIAL PRIMARY KEY, domain TEXT, visit_date DATE DEFAULT CURRENT_DATE, count INT DEFAULT 1, UNIQUE(domain, visit_date));`);
         try { await client.query("ALTER TABLE balance_logs ADD COLUMN IF NOT EXISTS balance_after NUMERIC(10, 4)"); } catch(e){ console.error("扩展日志字段失败:", e.message); }
 
         const defaults = [['rate', '7.0'], ['feeRate', '0'], ['announcement', '欢迎来到 NEXUS 商城'], ['popup', 'true'], ['walletAddress', '请联系客服获取地址']];
@@ -1058,6 +1059,26 @@ app.get('/api/public/data', async (req, res) => {
     }
 });
 
+app.post('/api/public/visit', async (req, res) => {
+    try {
+        const domain = req.body.domain || 'xaw888.com';
+        await pool.query(`INSERT INTO site_visits (domain, visit_date, count) VALUES ($1, CURRENT_DATE, 1) ON CONFLICT (domain, visit_date) DO UPDATE SET count = site_visits.count + 1`, [domain]);
+        res.json({ success: true });
+    } catch (e) { res.json({ success: false }); }
+});
+
+const getVisitStats = async () => {
+    const res = await pool.query(`
+        SELECT 
+            domain,
+            SUM(CASE WHEN visit_date = CURRENT_DATE THEN count ELSE 0 END) as today,
+            SUM(CASE WHEN visit_date = CURRENT_DATE - INTERVAL '1 day' THEN count ELSE 0 END) as yesterday
+        FROM site_visits
+        WHERE visit_date >= CURRENT_DATE - INTERVAL '1 day'
+        GROUP BY domain
+    `);
+    return res.rows;
+};
 
 app.post('/api/admin/login', async (req, res) => {
     if (req.body.username) {
@@ -1299,11 +1320,13 @@ app.get('/api/admin/all', adminAuth, async (req, res) => {
     try {
         const chatsRes = await pool.query('SELECT * FROM chats ORDER BY created_at ASC'); let chats = {};
         chatsRes.rows.forEach(msg => { if(!chats[msg.session_id]) chats[msg.session_id] = []; chats[msg.session_id].push(msg); });
+        const visitStats = await getVisitStats();
         res.json({
             users: (await pool.query('SELECT * FROM users ORDER BY created_at DESC')).rows,
             orders: (await pool.query('SELECT * FROM orders ORDER BY created_at DESC')).rows,
             products: (await pool.query('SELECT * FROM products ORDER BY id DESC')).rows,
             hiring: (await pool.query('SELECT * FROM hiring')).rows,
+            visits: visitStats,
             chats, rate: await getSetting('rate'), feeRate: await getSetting('feeRate'), announcement: await getSetting('announcement'), popup: (await getSetting('popup')) === 'true'
         });
     } catch(e) { res.status(500).json({}); }
@@ -1328,6 +1351,14 @@ app.post('/api/admin/chat/initiate', adminAuth, async (req, res) => {
     } catch (e) { res.status(500).json({success:false, msg: e.message}); }
 });
 app.post('/api/admin/chat/read', adminAuth, async (req, res) => { await pool.query("UPDATE chats SET is_read = TRUE WHERE session_id = $1 AND sender = 'user'", [req.body.sessionId]); res.json({success:true}); });
+app.post('/api/admin/chat/clear', adminAuth, async (req, res) => {
+    try {
+        await pool.query("DELETE FROM chats WHERE session_id = $1", [req.body.sessionId]);
+        res.json({success:true});
+    } catch (e) {
+        res.status(500).json({success:false, msg: e.message});
+    }
+});
 app.post('/api/chat/upload', upload.single('file'), async (req, res) => {
     if (req.file) { try { res.json({ success: true, url: await uploadToCloud(req.file.buffer) }); } catch (e) { res.json({ success: false, error: 'Upload failed' }); } }
     else res.json({ success: false, error: 'No file' });
@@ -1601,7 +1632,6 @@ setInterval(async () => {
         
         if (result.rowCount > 0) {
             console.log(`✅ [WebSocket 广播] 已成功随机扣除 ${result.rowCount} 个商品的库存，正在通过 Socket.IO 瞬间推送给所有在线用户！`);
-            // 这里就是 WebSocket 广播的核心调用
             broadcastGlobalUpdate(); 
         } else {
             console.log("ℹ️ [定时任务] 当前所有商品已售罄（库存为 0），无需扣除和广播。");
@@ -1610,6 +1640,22 @@ setInterval(async () => {
         console.error("❌ [定时任务] 随机扣除库存失败:", e.message); 
     }
 }, 90 * 60 * 1000); 
+
+setInterval(async () => {
+    try {
+        const timeoutOrders = await pool.query(`SELECT order_id, product_name FROM orders WHERE status = '待支付' AND qrcode_url IS NULL AND created_at < NOW() - INTERVAL '6 hours'`);
+        if (timeoutOrders.rowCount > 0) {
+            for (const order of timeoutOrders.rows) {
+                await pool.query("UPDATE orders SET status = '已关闭' WHERE order_id = $1", [order.order_id]);
+                if (order.product_name !== '余额充值' && !order.product_name.includes('|')) {
+                    await pool.query("UPDATE products SET stock = stock + 1 WHERE name = $1", [order.product_name]);
+                }
+            }
+            broadcastGlobalUpdate();
+            notifyAdminUpdate();
+        }
+    } catch (e) {}
+}, 10 * 60 * 1000);
 
 cron.schedule('0 0 * * *', async () => {
     try {
