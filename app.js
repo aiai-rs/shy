@@ -249,16 +249,17 @@ const initDB = async () => {
         console.log("正在尝试连接数据库: " + DATABASE_URL);
         const client = await pool.connect();
         console.log("数据库连接成功，开始初始化表结构...");
-await client.query(`CREATE TABLE IF NOT EXISTS orders (order_id TEXT PRIMARY KEY, user_id BIGINT, product_name TEXT, variant_name TEXT, payment_method TEXT, usdt_amount NUMERIC(10, 4), cny_amount NUMERIC(10, 2), status TEXT DEFAULT '待支付', shipping_info TEXT, tracking_number TEXT, qrcode_url TEXT, proof TEXT, wallet TEXT, source TEXT, image_url TEXT, quantity INT DEFAULT 1, expires_at TIMESTAMP, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
+await client.query(`CREATE TABLE IF NOT EXISTS orders (order_id TEXT PRIMARY KEY, user_id BIGINT, product_name TEXT, variant_name TEXT, payment_method TEXT, usdt_amount NUMERIC(10, 4), cny_amount NUMERIC(10, 2), status TEXT DEFAULT '待支付', shipping_info TEXT, tracking_number TEXT, qrcode_url TEXT, proof TEXT, wallet TEXT, source TEXT, image_url TEXT, quantity INT DEFAULT 1, expires_at TIMESTAMP, balance_deducted NUMERIC(10, 4) DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
 try { await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS image_url TEXT");
 await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS wallet TEXT");
 await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS source TEXT");
 await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS variant_name TEXT");
+await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS balance_deducted NUMERIC(10, 4) DEFAULT 0");
 await client.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS source TEXT"); } catch(e){ console.error("扩展字段失败:", e.message);
 }
         await client.query(`CREATE TABLE IF NOT EXISTS withdrawals (id SERIAL PRIMARY KEY, user_id BIGINT, amount NUMERIC(10, 4), address TEXT, status TEXT DEFAULT '处理中', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
-await client.query(`CREATE TABLE IF NOT EXISTS products (id BIGINT PRIMARY KEY, name TEXT NOT NULL, price NUMERIC(10, 2) NOT NULL, stock INT DEFAULT 0, category TEXT, type TEXT, description TEXT, image_url TEXT, is_pinned BOOLEAN DEFAULT FALSE, variants JSONB DEFAULT '[]'::jsonb);`);
-try { await client.query("ALTER TABLE products ADD COLUMN IF NOT EXISTS variants JSONB DEFAULT '[]'::jsonb"); } catch(e){ console.error("扩展字段失败:", e.message); }
+        await client.query(`CREATE TABLE IF NOT EXISTS products (id BIGINT PRIMARY KEY, name TEXT NOT NULL, price NUMERIC(10, 2) NOT NULL, stock INT DEFAULT 0, category TEXT, type TEXT, description TEXT, image_url TEXT, is_pinned BOOLEAN DEFAULT FALSE, variants JSONB DEFAULT '[]'::jsonb);`);
+        try { await client.query("ALTER TABLE products ADD COLUMN IF NOT EXISTS variants JSONB DEFAULT '[]'::jsonb"); await client.query("ALTER TABLE products ADD COLUMN IF NOT EXISTS is_hot BOOLEAN DEFAULT FALSE"); await client.query("ALTER TABLE products ADD COLUMN IF NOT EXISTS hot_time TIMESTAMP"); } catch(e){ console.error("扩展字段失败:", e.message); }
         await client.query(`CREATE TABLE IF NOT EXISTS hiring (id SERIAL PRIMARY KEY, title TEXT, content TEXT, contact TEXT);`);
         await client.query(`CREATE TABLE IF NOT EXISTS chats (id SERIAL PRIMARY KEY, session_id TEXT NOT NULL, sender TEXT, content TEXT, msg_type TEXT, source TEXT, is_read BOOLEAN DEFAULT FALSE, is_initiate BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
         try { await client.query("ALTER TABLE chats ADD COLUMN IF NOT EXISTS msg_type TEXT"); await client.query("ALTER TABLE chats ADD COLUMN IF NOT EXISTS source TEXT"); } catch(e){ console.error("扩展聊天字段失败:", e.message); }
@@ -303,7 +304,7 @@ const setSetting = async (key, value) => { await pool.query('INSERT INTO setting
 
 const broadcastGlobalUpdate = async () => {
     try {
-        const prods = await pool.query('SELECT * FROM products ORDER BY is_pinned DESC, id DESC');
+        const prods = await pool.query('SELECT * FROM products ORDER BY is_pinned DESC, is_hot DESC, hot_time ASC, id DESC');
         const rate = await getSetting('rate');
         const feeRate = await getSetting('feeRate');
         const announcement = await getSetting('announcement');
@@ -1167,6 +1168,7 @@ app.post('/api/user/change-password', async (req, res) => {
 });
 app.post('/api/order', async (req, res) => {
     const { userId, productId, variantName, variantPrice, cartItems, paymentMethod, shippingInfo, useBalance, contactInfo, source } = req.body;
+    if (contactInfo && contactInfo.length > 200) return res.json({ success: false, msg: '联系方式过长' });
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
@@ -1179,36 +1181,39 @@ app.post('/api/order', async (req, res) => {
                 prodName = cartItems.map(i => `${i.name}${i.variant_name ? ` (${i.variant_name})` : ''} x${i.quantity||1}`).join(' | '); if(prodName.length > 200) prodName = prodName.substring(0, 197) + '...';
                  orderQty = cartItems.reduce((sum, item) => sum + (parseInt(item.quantity) || 1), 0); orderImageUrl = cartItems[0].image_url || '';
             }
-            const dbProds = (await client.query('SELECT id, price, name, stock, variants FROM products WHERE id = ANY($1)', [cartItems.map(i => i.id)])).rows;
+const dbProds = (await client.query('SELECT id, price, name, variants FROM products WHERE id = ANY($1)', [cartItems.map(i => i.id)])).rows;
 for (const item of cartItems) {
                 if (parseInt(item.quantity) <= 0) throw new Error(`商品数量必须大于0`);
 const dbItem = dbProds.find(p => p.id.toString() === item.id.toString());
-                if (!dbItem) throw new Error(`商品ID ${item.id} 已下架`);
-if (dbItem.stock < item.quantity) throw new Error(`商品 ${dbItem.name} 库存不足`);
+                if (!dbItem) throw new Error(`商品 ${item.name} 已下架，请移出购物车`);
                 let itemPrice = parseFloat(dbItem.price);
                 if (item.variant_name && dbItem.variants) {
                     const vList = typeof dbItem.variants === 'string' ? JSON.parse(dbItem.variants) : dbItem.variants;
                     const vMatch = vList.find(v => v.name === item.variant_name);
                     if (vMatch) itemPrice = parseFloat(vMatch.price);
+                    else throw new Error(`商品 ${dbItem.name} 的规格 ${item.variant_name} 已失效`);
                 }
+                if (itemPrice !== parseFloat(item.price)) throw new Error(`商品 ${dbItem.name} 价格已变动，请重新结算`);
                 amount += itemPrice * parseInt(item.quantity);
-await client.query('UPDATE products SET stock = stock - $1 WHERE id = $2', [item.quantity, item.id]);
 }
         } else {
             const prod = (await client.query('SELECT * FROM products WHERE id = $1', [productId])).rows[0];
-if(prod) { if (prod.stock <= 0) throw new Error('商品库存不足'); prodName = prod.name; orderImageUrl = prod.image_url || ''; amount = parseFloat(prod.price);
+if(prod) { prodName = prod.name; orderImageUrl = prod.image_url || ''; amount = parseFloat(prod.price);
 if (variantName && prod.variants) {
     const vList = typeof prod.variants === 'string' ? JSON.parse(prod.variants) : prod.variants;
     const vMatch = vList.find(v => v.name === variantName);
     if (vMatch) { amount = parseFloat(vMatch.price); finalVariantName = variantName; }
+    else throw new Error(`规格 ${variantName} 已失效`);
 }
-orderQty = 1; await client.query('UPDATE products SET stock = GREATEST(0, stock - 1) WHERE id = $1', [productId]);
+if (amount !== parseFloat(variantPrice)) throw new Error(`商品 ${prod.name} 价格已变动，请刷新重试`);
+orderQty = 1; 
 }
-            else throw new Error('商品不存在');
+            else throw new Error('商品已下架或不存在');
 }
         let finalUSDT = amount;
+        let deduct = 0;
         if(useBalance && user && parseFloat(user.balance) > 0) {
-            const deduct = Math.min(parseFloat(user.balance), amount); finalUSDT -= deduct;
+            deduct = Math.min(parseFloat(user.balance), amount); finalUSDT -= deduct;
             await client.query('UPDATE users SET balance = balance - $1 WHERE id = $2', [deduct, userId]);
             await logBalance(client, userId, '购物消费', -deduct, `订单 ${prodName} 余额抵扣`);
         }
@@ -1216,8 +1221,8 @@ orderQty = 1; await client.query('UPDATE products SET stock = GREATEST(0, stock 
         const cnyAmount = (finalUSDT * rate * (1 + feeRate/100)).toFixed(2);
         const orderId = 'XAW-' + Math.floor(10000 + Math.random() * 90000); const wallet = await getSetting('walletAddress');
         let orderStatus = finalUSDT <= 0 ? '已支付' : '待支付';
-        await client.query(`INSERT INTO orders (order_id, user_id, product_name, variant_name, payment_method, usdt_amount, cny_amount, status, shipping_info, wallet, source, image_url, quantity, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW() + INTERVAL '30 minutes')`,
-            [orderId, userId, prodName, finalVariantName, paymentMethod, finalUSDT.toFixed(4), cnyAmount, orderStatus, JSON.stringify({ ...shippingInfo, contact_method: contactInfo }), wallet, source || 'xaw888.com', orderImageUrl, orderQty]);
+        await client.query(`INSERT INTO orders (order_id, user_id, product_name, variant_name, payment_method, usdt_amount, cny_amount, status, shipping_info, wallet, source, image_url, quantity, expires_at, balance_deducted) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW() + INTERVAL '30 minutes', $14)`,
+            [orderId, userId, prodName, finalVariantName, paymentMethod, finalUSDT.toFixed(4), cnyAmount, orderStatus, JSON.stringify({ ...shippingInfo, contact_method: contactInfo }), wallet, source || 'xaw888.com', orderImageUrl, orderQty, deduct]);
         await client.query('COMMIT');
         if (orderStatus === '已支付') handleReferralBonus(userId, amount, '消费'); 
 
@@ -1249,13 +1254,20 @@ orderQty = 1; await client.query('UPDATE products SET stock = GREATEST(0, stock 
 });
 app.get('/api/order', async (req, res) => { try { res.json((await pool.query(`SELECT * FROM orders WHERE user_id = $1 ORDER BY created_at DESC`, [req.query.userId])).rows); } catch(e) { res.json([]); } });
 app.post('/api/order/cancel', async (req, res) => {
+    const client = await pool.connect();
     try {
-        const order = (await pool.query('SELECT * FROM orders WHERE order_id = $1 AND user_id = $2', [req.body.orderId, req.body.userId])).rows[0];
-        if (!order) return res.json({ success: false, msg: '订单不存在' }); if (order.status !== '待支付') return res.json({ success: false, msg: '无法取消该订单' });
-        await pool.query("UPDATE orders SET status = '已关闭' WHERE order_id = $1", [req.body.orderId]);
-        if (order.product_name !== '余额充值' && order.product_name !== '购物车商品') await pool.query("UPDATE products SET stock = stock + 1 WHERE name = $1", [order.product_name]);
+        await client.query('BEGIN');
+        const order = (await client.query('SELECT * FROM orders WHERE order_id = $1 AND user_id = $2 FOR UPDATE', [req.body.orderId, req.body.userId])).rows[0];
+        if (!order) { await client.query('ROLLBACK'); return res.json({ success: false, msg: '订单不存在' }); }
+        if (order.status !== '待支付') { await client.query('ROLLBACK'); return res.json({ success: false, msg: '无法取消该订单' }); }
+        await client.query("UPDATE orders SET status = '已关闭' WHERE order_id = $1", [req.body.orderId]);
+        if (parseFloat(order.balance_deducted) > 0) {
+            await client.query('UPDATE users SET balance = balance + $1 WHERE id = $2', [parseFloat(order.balance_deducted), req.body.userId]);
+            await logBalance(client, req.body.userId, '订单取消', parseFloat(order.balance_deducted), `订单 ${req.body.orderId} 取消退回余额`);
+        }
+        await client.query('COMMIT');
         notifyAdminUpdate(); res.json({ success: true });
-    } catch (e) { res.json({ success: false, msg: e.message }); }
+    } catch (e) { await client.query('ROLLBACK'); res.json({ success: false, msg: e.message }); } finally { client.release(); }
 });
 app.post('/api/recharge', async (req, res) => {
     try {
@@ -1350,7 +1362,15 @@ app.post('/api/admin/chat/initiate', adminAuth, async (req, res) => {
         res.json({success:true, sessionId: sid});
     } catch (e) { res.status(500).json({success:false, msg: e.message}); }
 });
-app.post('/api/admin/chat/read', adminAuth, async (req, res) => { await pool.query("UPDATE chats SET is_read = TRUE WHERE session_id = $1 AND sender = 'user'", [req.body.sessionId]); res.json({success:true}); });
+app.post('/api/admin/chat/read', adminAuth, async (req, res) => { await pool.query("UPDATE chats SET is_read = TRUE WHERE session_id = $1 AND sender = 'user'", [req.body.sessionId]); io.emit('admin_chat_read', { sessionId: req.body.sessionId }); res.json({success:true}); });
+app.post('/api/admin/product/hot', adminAuth, async (req, res) => {
+    try {
+        if (!Array.isArray(req.body.ids)) return res.json({success:false});
+        if (req.body.isHot) await pool.query('UPDATE products SET is_hot = TRUE, hot_time = COALESCE(hot_time, NOW()) WHERE id = ANY($1)', [req.body.ids]);
+        else await pool.query('UPDATE products SET is_hot = FALSE, hot_time = NULL WHERE id = ANY($1)', [req.body.ids]);
+        await broadcastGlobalUpdate(); res.json({success:true});
+    } catch(e) { res.status(500).json({success:false}); }
+});
 app.post('/api/admin/chat/clear', adminAuth, async (req, res) => {
     try {
         await pool.query("DELETE FROM chats WHERE session_id = $1", [req.body.sessionId]);
@@ -1398,12 +1418,12 @@ app.post('/api/admin/category/priority', adminAuth, async (req, res) => {
 });
 app.post('/api/admin/product', adminAuth, upload.single('file'), async (req, res) => {
     try {
-        await pool.query('INSERT INTO products (id, name, price, stock, category, type, description, image_url, variants) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)', [Date.now(), req.body.name, req.body.price, req.body.stock, req.body.category, req.body.type, req.body.desc, req.file ? await uploadToCloud(req.file.buffer) : req.body.imageUrl || '', req.body.variants || '[]']);
+        await pool.query('INSERT INTO products (id, name, price, category, type, description, image_url, variants) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)', [Date.now(), req.body.name, req.body.price, req.body.category, req.body.type, req.body.desc, req.file ? await uploadToCloud(req.file.buffer) : req.body.imageUrl || '', req.body.variants || '[]']);
         await broadcastGlobalUpdate(); res.json({success:true});
     } catch (e) { res.json({success:false, msg: e.message}); }
 });
 app.put('/api/admin/product/:id', adminAuth, async (req, res) => {
-    await pool.query('UPDATE products SET name=$1, price=$2, stock=$3, category=$4, type=$5, description=$6, image_url=$7, variants=$8 WHERE id=$9', [req.body.name, req.body.price, req.body.stock, req.body.category, req.body.type, req.body.desc, req.body.imageUrl, req.body.variants || '[]', req.params.id]);
+    await pool.query('UPDATE products SET name=$1, price=$2, category=$3, type=$4, description=$5, image_url=$6, variants=$7 WHERE id=$8', [req.body.name, req.body.price, req.body.category, req.body.type, req.body.desc, req.body.imageUrl, req.body.variants || '[]', req.params.id]);
     await broadcastGlobalUpdate(); res.json({success:true});
 });
 app.delete('/api/admin/product/:id', adminAuth, async (req, res) => { await pool.query('DELETE FROM products WHERE id = $1', [req.params.id]); await broadcastGlobalUpdate(); res.json({success:true}); });
@@ -1414,20 +1434,6 @@ app.post('/api/admin/product/pin/:id', adminAuth, async (req, res) => {
         await pool.query('UPDATE products SET is_pinned = $1 WHERE id = $2', [!productRes.rows[0].is_pinned, req.params.id]);
         await broadcastGlobalUpdate(); notifyAdminUpdate(); res.json({ success: true, is_pinned: !productRes.rows[0].is_pinned });
     } catch (e) { res.status(500).json({ success: false, msg: e.message }); }
-});
-
-// [新增] 一键补库存接口
-app.post('/api/admin/product/restock_all', adminAuth, async (req, res) => {
-    try {
-        const amount = parseInt(req.body.amount) || 999;
-        // 把所有商品的库存统一修改为传入的数值
-        await pool.query('UPDATE products SET stock = $1', [amount]);
-        // 广播给所有用户，前端库存瞬间填满
-        await broadcastGlobalUpdate(); 
-        res.json({success: true});
-    } catch (e) { 
-        res.status(500).json({success: false, msg: e.message}); 
-    }
 });
 
 app.post('/api/admin/update/hiring', adminAuth, async (req, res) => {
@@ -1484,14 +1490,18 @@ app.get('/api/admin/balance_logs', adminAuth, async (req, res) => {
     try { res.json((await pool.query(`SELECT b.*, u.contact FROM balance_logs b LEFT JOIN users u ON b.user_id = u.id ${req.query.userId ? 'WHERE b.user_id = $1' : ''} ORDER BY b.created_at DESC LIMIT 200`, req.query.userId ? [req.query.userId] : [])).rows); } catch(e) { res.status(500).json([]); }
 });
 app.post('/api/admin/order/cancel', adminAuth, async (req, res) => {
+    const client = await pool.connect();
     try {
-        const client = await pool.connect(); await client.query('BEGIN');
-        const order = (await client.query("SELECT * FROM orders WHERE order_id = $1", [req.body.orderId])).rows[0];
+        await client.query('BEGIN');
+        const order = (await client.query("SELECT * FROM orders WHERE order_id = $1 FOR UPDATE", [req.body.orderId])).rows[0];
         if (!order) throw new Error('订单不存在');
         await client.query("UPDATE orders SET status = '已取消' WHERE order_id = $1", [req.body.orderId]);
-        if (order.product_name !== '余额充值' && order.product_name !== '购物车商品') await client.query("UPDATE products SET stock = stock + 1 WHERE name = $1", [order.product_name]);
-        await client.query('COMMIT'); io.to(`user_${order.user_id}`).emit('order_update'); client.release(); res.json({ success: true });
-    } catch (e) { res.json({ success: false, msg: e.message }); }
+        if (parseFloat(order.balance_deducted) > 0 && order.status === '待支付') {
+            await client.query('UPDATE users SET balance = balance + $1 WHERE id = $2', [parseFloat(order.balance_deducted), order.user_id]);
+            await logBalance(client, order.user_id, '订单取消', parseFloat(order.balance_deducted), `管理员取消订单 ${req.body.orderId} 退回余额`);
+        }
+        await client.query('COMMIT'); io.to(`user_${order.user_id}`).emit('order_update'); res.json({ success: true });
+    } catch (e) { await client.query('ROLLBACK'); res.json({ success: false, msg: e.message }); } finally { client.release(); }
 });
 
 
@@ -1622,39 +1632,24 @@ io.on('connection', (socket) => {
 // [8] 定時任務與啟動
 // ==========================================
 
-// 每 90 分钟自动随机扣除库存，并通过 WebSocket 广播给所有用户
 setInterval(async () => {
-    try { 
-        console.log("⏱️ [定时任务] 90分钟触发：准备模拟真实销量，随机扣除商品库存...");
-        
-        // 执行数据库扣除，并返回被修改的商品数量
-        const result = await pool.query(`UPDATE products SET stock = GREATEST(0, stock - floor(random() * 5 + 1)::int) WHERE stock > 0 RETURNING id`); 
-        
-        if (result.rowCount > 0) {
-            console.log(`✅ [WebSocket 广播] 已成功随机扣除 ${result.rowCount} 个商品的库存，正在通过 Socket.IO 瞬间推送给所有在线用户！`);
-            broadcastGlobalUpdate(); 
-        } else {
-            console.log("ℹ️ [定时任务] 当前所有商品已售罄（库存为 0），无需扣除和广播。");
-        }
-    } catch(e) { 
-        console.error("❌ [定时任务] 随机扣除库存失败:", e.message); 
-    }
-}, 90 * 60 * 1000); 
-
-setInterval(async () => {
+    const client = await pool.connect();
     try {
-        const timeoutOrders = await pool.query(`SELECT order_id, product_name FROM orders WHERE status = '待支付' AND qrcode_url IS NULL AND created_at < NOW() - INTERVAL '6 hours'`);
+        const timeoutOrders = await client.query(`SELECT order_id, product_name, balance_deducted, user_id FROM orders WHERE status = '待支付' AND qrcode_url IS NULL AND created_at < NOW() - INTERVAL '6 hours'`);
         if (timeoutOrders.rowCount > 0) {
+            await client.query('BEGIN');
             for (const order of timeoutOrders.rows) {
-                await pool.query("UPDATE orders SET status = '已关闭' WHERE order_id = $1", [order.order_id]);
-                if (order.product_name !== '余额充值' && !order.product_name.includes('|')) {
-                    await pool.query("UPDATE products SET stock = stock + 1 WHERE name = $1", [order.product_name]);
+                await client.query("UPDATE orders SET status = '已关闭' WHERE order_id = $1", [order.order_id]);
+                if (parseFloat(order.balance_deducted) > 0) {
+                    await client.query('UPDATE users SET balance = balance + $1 WHERE id = $2', [parseFloat(order.balance_deducted), order.user_id]);
+                    await logBalance(client, order.user_id, '订单超时', parseFloat(order.balance_deducted), `订单 ${order.order_id} 超时关闭退回余额`);
                 }
             }
+            await client.query('COMMIT');
             broadcastGlobalUpdate();
             notifyAdminUpdate();
         }
-    } catch (e) {}
+    } catch (e) { await client.query('ROLLBACK'); } finally { client.release(); }
 }, 10 * 60 * 1000);
 
 cron.schedule('0 0 * * *', async () => {
