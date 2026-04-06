@@ -747,6 +747,8 @@ bot.on('text', async (ctx, next) => {
     const text = ctx.message.text.trim();
     const chatId = String(ctx.chat.id);
 
+    const couponMatch = text.match(/^(?:设置)?优惠[劵券]\s*(\d+(?:\.\d+)?)/);
+
     // 商城設定
     if (chatId === TG_ADMIN_GROUP_ID) {
         if (text === '/fix_db') {
@@ -758,6 +760,15 @@ bot.on('text', async (ctx, next) => {
         if (text.startsWith('设置汇率 ')) { const val = parseFloat(text.split(' ')[1]); if (!isNaN(val)) { await setSetting('rate', val); await broadcastGlobalUpdate(); return ctx.reply(`✅ 汇率已设为: ${val}`); } }
         if (text.startsWith('设置手续费 ')) { const val = parseFloat(text.split(' ')[1]); if (!isNaN(val)) { await setSetting('feeRate', val); await broadcastGlobalUpdate(); return ctx.reply(`✅ 手续费已设为: ${val}%`); } }
         if (text.startsWith('设置钱包 ')) { const addr = text.split(' ')[1]; if (addr && addr.length > 10) { await setSetting('walletAddress', addr); await broadcastGlobalUpdate(); return ctx.reply(`✅ <b>收款地址已更新</b>\n<code>${addr}</code>`, {parse_mode:'HTML'}); } }
+        
+        if (couponMatch) {
+            const amount = parseFloat(couponMatch[1]);
+            if (!isNaN(amount) && amount > 0) {
+                const code = 'xaw' + Math.floor(1000 + Math.random() * 9000);
+                await pool.query(`INSERT INTO coupons (code, amount, expires_at) VALUES ($1, $2, NOW() + INTERVAL '30 minutes')`, [code, amount]);
+                return ctx.reply(`🎁 <b>优惠劵生成成功</b>\n\n立减金额: <b>${amount}</b>\n有效期: <b>30分钟</b>\n\n点击下方验证码复制给用户：\n<code>${code}</code>\n\n⚠️ 温馨提示：请告诉用户在结算时填写此优惠码即可立减 ${amount}！`, { parse_mode: 'HTML' });
+            }
+        }
     }
 
     // 群管系統攔截
@@ -770,11 +781,7 @@ bot.on('text', async (ctx, next) => {
             return;
         }
 
-        if (isAdminUser && ctx.message.reply_to_message) {
-            const replyId = ctx.message.reply_to_message.message_id;
-            let target = warningMessages.get(replyId) || unauthorizedMessages.get(replyId) || { userId: ctx.message.reply_to_message.from.id, userName: ctx.message.reply_to_message.from.first_name };
-            
-            const couponMatch = text.match(/^(?:设置)?优惠[劵券]\s*(\d+(?:\.\d+)?)/);
+        if (isAdminUser) {
             if (couponMatch) {
                 const amount = parseFloat(couponMatch[1]);
                 if (!isNaN(amount) && amount > 0) {
@@ -783,7 +790,12 @@ bot.on('text', async (ctx, next) => {
                     return ctx.reply(`🎁 <b>优惠劵生成成功</b>\n\n立减金额: <b>${amount}</b>\n有效期: <b>30分钟</b>\n\n点击下方验证码复制给用户：\n<code>${code}</code>\n\n⚠️ 温馨提示：请告诉用户在结算时填写此优惠码即可立减 ${amount}！`, { parse_mode: 'HTML' });
                 }
             }
-            if (text.startsWith('打款 ')) {
+
+            if (ctx.message.reply_to_message) {
+                const replyId = ctx.message.reply_to_message.message_id;
+                let target = warningMessages.get(replyId) || unauthorizedMessages.get(replyId) || { userId: ctx.message.reply_to_message.from.id, userName: ctx.message.reply_to_message.from.first_name };
+                
+                if (text.startsWith('打款 ')) {
                 const amount = text.split(' ')[1]; 
                 if (amount) {
                     const targetUser = ctx.message.reply_to_message.from;
