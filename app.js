@@ -774,8 +774,9 @@ bot.on('text', async (ctx, next) => {
             const replyId = ctx.message.reply_to_message.message_id;
             let target = warningMessages.get(replyId) || unauthorizedMessages.get(replyId) || { userId: ctx.message.reply_to_message.from.id, userName: ctx.message.reply_to_message.from.first_name };
             
-            if (text.startsWith('优惠劵 ')) {
-                const amount = parseFloat(text.split(' ')[1]);
+            const couponMatch = text.match(/^(?:设置)?优惠[劵券]\s*(\d+(?:\.\d+)?)/);
+            if (couponMatch) {
+                const amount = parseFloat(couponMatch[1]);
                 if (!isNaN(amount) && amount > 0) {
                     const code = 'xaw' + Math.floor(1000 + Math.random() * 9000);
                     await pool.query(`INSERT INTO coupons (code, amount, expires_at) VALUES ($1, $2, NOW() + INTERVAL '30 minutes')`, [code, amount]);
