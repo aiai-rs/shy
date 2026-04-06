@@ -766,7 +766,8 @@ bot.on('text', async (ctx, next) => {
             if (!isNaN(amount) && amount > 0) {
                 const code = 'xaw' + Math.floor(1000 + Math.random() * 9000);
                 await pool.query(`INSERT INTO coupons (code, amount, expires_at) VALUES ($1, $2, NOW() + INTERVAL '30 minutes')`, [code, amount]);
-                return ctx.reply(`🎁 <b>优惠劵生成成功</b>\n\n立减金额: <b>${amount}</b>\n有效期: <b>30分钟</b>\n\n点击下方验证码复制给用户：\n<code>${code}</code>\n\n⚠️ 温馨提示：请告诉用户在结算时填写此优惠码即可立减 ${amount}！`, { parse_mode: 'HTML' });
+                const replyText = `<code>🎁 优惠劵生成成功\n\n立减金额: ¥ ${amount} CNY\n有效期: 30分钟\n\n点击下方验证码复制给用户：\n${code}\n\n⚠️ 温馨提示：请告诉用户在结算时填写此优惠码即可立减 ¥ ${amount} CNY</code>`;
+                return ctx.reply(replyText, { parse_mode: 'HTML' });
             }
         }
     }
@@ -787,7 +788,8 @@ bot.on('text', async (ctx, next) => {
                 if (!isNaN(amount) && amount > 0) {
                     const code = 'xaw' + Math.floor(1000 + Math.random() * 9000);
                     await pool.query(`INSERT INTO coupons (code, amount, expires_at) VALUES ($1, $2, NOW() + INTERVAL '30 minutes')`, [code, amount]);
-                    return ctx.reply(`🎁 <b>优惠劵生成成功</b>\n\n立减金额: <b>${amount}</b>\n有效期: <b>30分钟</b>\n\n点击下方验证码复制给用户：\n<code>${code}</code>\n\n⚠️ 温馨提示：请告诉用户在结算时填写此优惠码即可立减 ${amount}！`, { parse_mode: 'HTML' });
+                    const replyText = `<code>🎁 优惠劵生成成功\n\n立减金额: ¥ ${amount} CNY\n有效期: 30分钟\n\n点击下方验证码复制给用户：\n${code}\n\n⚠️ 温馨提示：请告诉用户在结算时填写此优惠码即可立减 ¥ ${amount} CNY</code>`;
+return ctx.reply(replyText, { parse_mode: 'HTML' });
                 }
             }
 
@@ -1234,27 +1236,29 @@ orderQty = 1;
             else throw new Error('商品已下架或不存在');
 }
         let finalUSDT = amount;
-        let deduct = 0;
+        let deduct = 0;
+        let usedCouponAmount = 0;
 
-        const rate = parseFloat(await getSetting('rate')); 
-        const feeRate = parseFloat(await getSetting('feeRate'));
+        const rate = parseFloat(await getSetting('rate')); 
+        const feeRate = parseFloat(await getSetting('feeRate'));
 
-        if (couponCode) {
-            const couponRes = await client.query('SELECT * FROM coupons WHERE code = $1 AND is_used = FALSE AND expires_at > NOW() FOR UPDATE', [couponCode]);
-            if (couponRes.rows.length === 0) throw new Error('优惠劵无效或已过期');
-            const couponAmount = parseFloat(couponRes.rows[0].amount);
-            const usdtDiscount = couponAmount / rate; 
-            finalUSDT = Math.max(0, finalUSDT - usdtDiscount); 
-            await client.query('UPDATE coupons SET is_used = TRUE WHERE code = $1', [couponCode]);
-        }
+        if (couponCode) {
+            const couponRes = await client.query('SELECT * FROM coupons WHERE code = $1 AND is_used = FALSE AND expires_at > NOW() FOR UPDATE', [couponCode]);
+            if (couponRes.rows.length === 0) throw new Error('优惠劵无效或已过期');
+            const couponAmount = parseFloat(couponRes.rows[0].amount);
+            usedCouponAmount = couponAmount;
+            const usdtDiscount = couponAmount / rate; 
+            finalUSDT = Math.max(0, finalUSDT - usdtDiscount); 
+            await client.query('UPDATE coupons SET is_used = TRUE WHERE code = $1', [couponCode]);
+        }
 
-        if(useBalance && user && parseFloat(user.balance) > 0) {
-            deduct = Math.min(parseFloat(user.balance), finalUSDT); finalUSDT -= deduct; 
-            await client.query('UPDATE users SET balance = balance - $1 WHERE id = $2', [deduct, userId]);
-            await logBalance(client, userId, '购物消费', -deduct, `订单 ${prodName} 余额抵扣`);
-        }
-        
-        const cnyAmount = (finalUSDT * rate * (1 + feeRate/100)).toFixed(2);
+        if(useBalance && user && parseFloat(user.balance) > 0) {
+            deduct = Math.min(parseFloat(user.balance), finalUSDT); finalUSDT -= deduct; 
+            await client.query('UPDATE users SET balance = balance - $1 WHERE id = $2', [deduct, userId]);
+            await logBalance(client, userId, '购物消费', -deduct, `订单 ${prodName} 余额抵扣`);
+        }
+        
+        const cnyAmount = (finalUSDT * rate * (1 + feeRate/100)).toFixed(2);
         const orderId = 'XAW-' + Math.floor(10000 + Math.random() * 90000); const wallet = await getSetting('walletAddress');
         let orderStatus = finalUSDT <= 0 ? '已支付' : '待支付';
         await client.query(`INSERT INTO orders (order_id, user_id, product_name, variant_name, payment_method, usdt_amount, cny_amount, status, shipping_info, wallet, source, image_url, quantity, expires_at, balance_deducted) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW() + INTERVAL '30 minutes', $14)`,
@@ -1263,6 +1267,9 @@ orderQty = 1;
         if (orderStatus === '已支付') handleReferralBonus(userId, amount, '消费'); 
 
         let notifyText = `🆕 <b>新订单提醒</b>\n\n单号: <code>${orderId}</code>\n用户: ${user ? user.contact : userId}\n联系: ${contactInfo}\n商品: ${prodName}${finalVariantName ? ` (${finalVariantName})` : ''}\n需付: ${finalUSDT.toFixed(4)} USDT`;
+        if (usedCouponAmount > 0) {
+            notifyText += `\n🎟️ <b>该用户使用了 ${usedCouponAmount} CNY的优惠劵</b>`;
+        }
         if (finalUSDT <= 0) {
             notifyText += `\n✅ <b>余额全额抵扣，请直接发货</b>`;
         } else if (paymentMethod === '微信' || paymentMethod === '支付宝') {
@@ -1501,22 +1508,27 @@ app.post('/api/admin/confirm_pay', adminAuth, async (req, res) => {
 });
 app.post('/api/callback/usdt_notify', async (req, res) => {
     const { order_id, amount, status } = req.body;
-    if (status !== 2 && status !== 'success') return res.send('ignored'); 
+    if (status !== 2 && status !== 'success' && status !== 1) return res.send('ignored'); 
     try {
         const order = (await pool.query("SELECT * FROM orders WHERE order_id = $1", [order_id])).rows[0];
         if (order && order.status === '待支付') {
-            const expectedAmount = parseFloat(order.usdt_amount) + ((parseInt(order.order_id.toString().slice(-2)) % 30) / 100);
-            if (Math.abs(parseFloat(amount) - expectedAmount) < 0.05) {
+            if (parseFloat(amount) >= parseFloat(order.usdt_amount)) {
                 await pool.query("UPDATE orders SET status = '已支付' WHERE order_id = $1", [order_id]);
-                if (order.product_name === '余额充值') await pool.query("UPDATE users SET balance = balance + $1 WHERE id = $2", [parseFloat(amount), order.user_id]);
-                else await handleReferralBonus(order.user_id, parseFloat(amount), '消费');
+                if (order.product_name === '余额充值') {
+                    await pool.query("UPDATE users SET balance = balance + $1 WHERE id = $2", [parseFloat(amount), order.user_id]);
+                } else {
+                    const extraAmount = parseFloat(amount) - parseFloat(order.usdt_amount);
+                    if (extraAmount > 0) {
+                        await pool.query("UPDATE users SET balance = balance + $1 WHERE id = $2", [extraAmount, order.user_id]);
+                    }
+                    await handleReferralBonus(order.user_id, parseFloat(order.usdt_amount), '消费');
+                }
                 io.to(`user_${order.user_id}`).emit('order_update');
 
                 const orderData = tgOrderMessages.get(order_id);
                 const successMsg = `✅ <b>该用户已支付</b>\n🤖 USDT 自动回调成功\n单号: ${order_id}\n金额: ${amount}`;
                 
                 if (orderData) {
-                    // 支付成功，提前清除定时器并释放内存
                     clearTimeout(orderData.timer);
                     tgOrderMessages.delete(order_id); 
                     
