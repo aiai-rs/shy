@@ -1234,23 +1234,27 @@ orderQty = 1;
             else throw new Error('商品已下架或不存在');
 }
         let finalUSDT = amount;
-        let deduct = 0;
+        let deduct = 0;
 
-        if (couponCode) {
-            const couponRes = await client.query('SELECT * FROM coupons WHERE code = $1 AND is_used = FALSE AND expires_at > NOW() FOR UPDATE', [couponCode]);
-            if (couponRes.rows.length === 0) throw new Error('优惠劵无效或已过期');
-            const couponAmount = parseFloat(couponRes.rows[0].amount);
-            finalUSDT = Math.max(0, finalUSDT - couponAmount);
-            await client.query('UPDATE coupons SET is_used = TRUE WHERE code = $1', [couponCode]);
-        }
+        const rate = parseFloat(await getSetting('rate')); 
+        const feeRate = parseFloat(await getSetting('feeRate'));
 
-        if(useBalance && user && parseFloat(user.balance) > 0) {
-            deduct = Math.min(parseFloat(user.balance), amount); finalUSDT -= deduct;
-            await client.query('UPDATE users SET balance = balance - $1 WHERE id = $2', [deduct, userId]);
-            await logBalance(client, userId, '购物消费', -deduct, `订单 ${prodName} 余额抵扣`);
-        }
-        const rate = parseFloat(await getSetting('rate')); const feeRate = parseFloat(await getSetting('feeRate'));
-        const cnyAmount = (finalUSDT * rate * (1 + feeRate/100)).toFixed(2);
+        if (couponCode) {
+            const couponRes = await client.query('SELECT * FROM coupons WHERE code = $1 AND is_used = FALSE AND expires_at > NOW() FOR UPDATE', [couponCode]);
+            if (couponRes.rows.length === 0) throw new Error('优惠劵无效或已过期');
+            const couponAmount = parseFloat(couponRes.rows[0].amount);
+            const usdtDiscount = couponAmount / rate; 
+            finalUSDT = Math.max(0, finalUSDT - usdtDiscount); 
+            await client.query('UPDATE coupons SET is_used = TRUE WHERE code = $1', [couponCode]);
+        }
+
+        if(useBalance && user && parseFloat(user.balance) > 0) {
+            deduct = Math.min(parseFloat(user.balance), finalUSDT); finalUSDT -= deduct; 
+            await client.query('UPDATE users SET balance = balance - $1 WHERE id = $2', [deduct, userId]);
+            await logBalance(client, userId, '购物消费', -deduct, `订单 ${prodName} 余额抵扣`);
+        }
+        
+        const cnyAmount = (finalUSDT * rate * (1 + feeRate/100)).toFixed(2);
         const orderId = 'XAW-' + Math.floor(10000 + Math.random() * 90000); const wallet = await getSetting('walletAddress');
         let orderStatus = finalUSDT <= 0 ? '已支付' : '待支付';
         await client.query(`INSERT INTO orders (order_id, user_id, product_name, variant_name, payment_method, usdt_amount, cny_amount, status, shipping_info, wallet, source, image_url, quantity, expires_at, balance_deducted) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW() + INTERVAL '30 minutes', $14)`,
