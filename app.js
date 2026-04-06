@@ -22,6 +22,7 @@ const { v4: uuidv4 } = require('uuid');
 const crypto = require('crypto');
 const xlsx = require('xlsx');
 const https = require('https');
+const WebSocket = require('ws');
 
 // ==========================================
 // [1] 基礎配置與變量定義
@@ -1253,14 +1254,36 @@ orderQty = 1;
         }
 
         if(useBalance && user && parseFloat(user.balance) > 0) {
-            deduct = Math.min(parseFloat(user.balance), finalUSDT); finalUSDT -= deduct; 
-            await client.query('UPDATE users SET balance = balance - $1 WHERE id = $2', [deduct, userId]);
-            await logBalance(client, userId, '购物消费', -deduct, `订单 ${prodName} 余额抵扣`);
-        }
-        
-        const cnyAmount = (finalUSDT * rate * (1 + feeRate/100)).toFixed(2);
-        const orderId = 'XAW-' + Math.floor(10000 + Math.random() * 90000); const wallet = await getSetting('walletAddress');
-        let orderStatus = finalUSDT <= 0 ? '已支付' : '待支付';
+            deduct = Math.min(parseFloat(user.balance), finalUSDT); finalUSDT -= deduct; 
+            await client.query('UPDATE users SET balance = balance - $1 WHERE id = $2', [deduct, userId]);
+            await logBalance(client, userId, '购物消费', -deduct, `订单 ${prodName} 余额抵扣`);
+        }
+        
+        // ================= 新增：USDT 金额偏移法（随机附加 0.01 ~ 0.30） =================
+        if (finalUSDT > 0 && (paymentMethod === 'USDT' || paymentMethod === 'usdt')) {
+            let isUnique = false;
+            let maxRetries = 10; // 最多尝试10次，防止死循环
+            let testUSDT = finalUSDT;
+            
+            while (!isUnique && maxRetries > 0) {
+                // 随机生成 0.01 到 0.30 之间的偏移量
+                const randomOffset = parseFloat((Math.floor(Math.random() * 30) + 1) / 100);
+                testUSDT = parseFloat((finalUSDT + randomOffset).toFixed(4));
+                
+                // 查库：确保目前没有状态为“待支付”且金额完全一样的订单
+                const checkRes = await client.query("SELECT order_id FROM orders WHERE status = '待支付' AND usdt_amount = $1", [testUSDT.toFixed(4)]);
+                if (checkRes.rows.length === 0) {
+                    isUnique = true; // 找到了唯一的金额
+                }
+                maxRetries--;
+            }
+            finalUSDT = testUSDT; // 将最终加上随机小数的金额赋给订单
+        }
+        // =================================================================================
+
+        const cnyAmount = (finalUSDT * rate * (1 + feeRate/100)).toFixed(2);
+        const orderId = 'XAW-' + Math.floor(10000 + Math.random() * 90000); const wallet = await getSetting('walletAddress');
+        let orderStatus = finalUSDT <= 0 ? '已支付' : '待支付';
         await client.query(`INSERT INTO orders (order_id, user_id, product_name, variant_name, payment_method, usdt_amount, cny_amount, status, shipping_info, wallet, source, image_url, quantity, expires_at, balance_deducted) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW() + INTERVAL '30 minutes', $14)`,
             [orderId, userId, prodName, finalVariantName, paymentMethod, finalUSDT.toFixed(4), cnyAmount, orderStatus, JSON.stringify({ ...shippingInfo, contact_method: contactInfo }), wallet, source || 'xaw888.com', orderImageUrl, orderQty, deduct]);
         await client.query('COMMIT');
@@ -1313,10 +1336,32 @@ app.post('/api/order/cancel', async (req, res) => {
     } catch (e) { await client.query('ROLLBACK'); res.json({ success: false, msg: e.message }); } finally { client.release(); }
 });
 app.post('/api/recharge', async (req, res) => {
-    try {
-        const user = (await pool.query('SELECT * FROM users WHERE id = $1', [req.body.userId])).rows[0]; if(!user) return res.json({success:false, msg:'User not found'});
-        const usdtAmount = parseFloat(req.body.amount); const cnyAmount = (usdtAmount * parseFloat(await getSetting('rate'))).toFixed(2);
-        const orderId = 'XAW-' + Math.floor(10000 + Math.random() * 90000); const wallet = await getSetting('walletAddress');
+    try {
+        const user = (await pool.query('SELECT * FROM users WHERE id = $1', [req.body.userId])).rows[0]; if(!user) return res.json({success:false, msg:'User not found'});
+        let usdtAmount = parseFloat(req.body.amount); 
+
+        // ================= 新增：充值 USDT 金额偏移法（随机附加 0.01 ~ 0.30） =================
+        if (req.body.method === 'USDT' || req.body.method === 'usdt') {
+            let isUnique = false;
+            let maxRetries = 10;
+            let testUSDT = usdtAmount;
+            
+            while (!isUnique && maxRetries > 0) {
+                const randomOffset = parseFloat((Math.floor(Math.random() * 30) + 1) / 100);
+                testUSDT = parseFloat((usdtAmount + randomOffset).toFixed(4));
+                
+                const checkRes = await pool.query("SELECT order_id FROM orders WHERE status = '待支付' AND usdt_amount = $1", [testUSDT.toFixed(4)]);
+                if (checkRes.rows.length === 0) {
+                    isUnique = true;
+                }
+                maxRetries--;
+            }
+            usdtAmount = testUSDT;
+        }
+        // =================================================================================
+
+        const cnyAmount = (usdtAmount * parseFloat(await getSetting('rate'))).toFixed(2);
+        const orderId = 'XAW-' + Math.floor(10000 + Math.random() * 90000); const wallet = await getSetting('walletAddress');
         await pool.query(`INSERT INTO orders (order_id, user_id, product_name, payment_method, usdt_amount, cny_amount, wallet, expires_at) VALUES ($1, $2, '余额充值', $3, $4, $5, $6, NOW() + INTERVAL '30 minutes')`, [orderId, req.body.userId, req.body.method, usdtAmount.toFixed(4), cnyAmount, wallet]);
         sendTgNotify(`💰 <b>新充值订单</b>\n单号: <code>${orderId}</code>\n用户: ${user.contact}\n金额: ${usdtAmount} USDT`);
         notifyAdminUpdate(); res.json({ success: true, orderId, usdtAmount: usdtAmount.toFixed(4), cnyAmount, wallet });
@@ -1506,40 +1551,37 @@ app.post('/api/admin/confirm_pay', adminAuth, async (req, res) => {
         } else { await client.query('ROLLBACK'); res.json({success:false, msg:'订单状态已经是已支付，请勿重复操作'}); }
     } catch(e) { await client.query('ROLLBACK'); res.status(500).json({success:false, msg:e.message}); } finally { client.release(); }
 });
-app.post('/api/callback/usdt_notify', async (req, res) => {
-    // 【新增】第一步：打印支付网关发来的所有原始数据！这是排查回调失败的最关键信息！
-    console.log("【USDT回调接收】收到支付网关请求:", req.body);
+function startUSDTWebSocketListener() {
+    const wsUrl = process.env.TRON_WS_URL || 'wss://api.trongrid.io/event';
+    const usdtContractAddress = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t';
+    let ws = new WebSocket(wsUrl);
 
-    // 【修改】兼容不同的字段名 (网关可能发的是 out_trade_no, total_amount 等)
-    const order_id = req.body.order_id || req.body.out_trade_no || req.body.tradeId || req.body.orderId;
-    const amount = req.body.amount || req.body.total_amount || req.body.pay_amount || req.body.money;
-    const status = req.body.status || req.body.trade_status || req.body.pay_status || req.body.state;
+    ws.on('open', () => {
+        ws.send(JSON.stringify({
+            event: 'subscribe',
+            contractAddress: usdtContractAddress,
+            eventName: 'Transfer'
+        }));
+    });
 
-    console.log(`【USDT回调解析】提取参数: 订单号=${order_id}, 金额=${amount}, 状态=${status}`);
+    ws.on('message', async (data) => {
+        try {
+            const response = JSON.parse(data);
+            if (response && response.event === 'Transfer' && response.result) {
+                const toAddress = response.result.to;
+                const amountRaw = response.result.value;
+                const amount = (parseFloat(amountRaw) / 1000000).toFixed(4);
 
-    if (!order_id) {
-        console.log("【USDT回调拦截】未找到订单号字段");
-        return res.send('missing_order_id');
-    }
+                const systemWallet = await getSetting('walletAddress');
+                if (!systemWallet || toAddress !== systemWallet) return;
 
-    // 【修改】兼容状态检查：转为字符串并全部变小写，防止网关发来大写的 "SUCCESS" 或 "PAID" 导致被拦截
-    const statusStr = String(status).toLowerCase();
-    if (statusStr !== '2' && statusStr !== 'success' && statusStr !== '1' && statusStr !== 'paid' && statusStr !== 'true') {
-        console.log("【USDT回调拦截】状态不符合成功条件。当前状态:", statusStr);
-        return res.send('ignored'); 
-    }
+                const order = (await pool.query("SELECT * FROM orders WHERE status = '待支付' AND usdt_amount = $1 ORDER BY created_at ASC LIMIT 1", [amount])).rows[0];
 
-    try {
-        const order = (await pool.query("SELECT * FROM orders WHERE order_id = $1", [order_id])).rows[0];
-        if (!order) {
-            console.log("【USDT回调拦截】数据库中找不到该订单号:", order_id);
-            return res.send('order_not_found');
-        }
+                if (!order) return;
 
-        if (order.status === '待支付') {
-            console.log(`【USDT回调金额比对】实际支付: ${amount} USDT, 订单应付: ${order.usdt_amount} USDT`);
-            if (parseFloat(amount) >= parseFloat(order.usdt_amount)) {
+                const order_id = order.order_id;
                 await pool.query("UPDATE orders SET status = '已支付' WHERE order_id = $1", [order_id]);
+
                 if (order.product_name === '余额充值') {
                     await pool.query("UPDATE users SET balance = balance + $1 WHERE id = $2", [parseFloat(amount), order.user_id]);
                 } else {
@@ -1552,32 +1594,27 @@ app.post('/api/callback/usdt_notify', async (req, res) => {
                 io.to(`user_${order.user_id}`).emit('order_update');
 
                 const orderData = tgOrderMessages.get(order_id);
-                const successMsg = `✅ <b>该用户已支付</b>\n🤖 USDT 自动回调成功\n单号: ${order_id}\n金额: ${amount}`;
-                
+                const successMsg = `✅ <b>该用户已支付</b>\n🤖 USDT WebSocket 自动回调成功\n单号: ${order_id}\n金额: ${amount}`;
+
                 if (orderData) {
                     clearTimeout(orderData.timer);
-                    tgOrderMessages.delete(order_id); 
-                    
-                    bot.telegram.sendMessage(TG_ADMIN_GROUP_ID, successMsg, { parse_mode: 'HTML', reply_to_message_id: orderData.msgId }).catch(e => console.error("TG发送失败:", e.message));
+                    tgOrderMessages.delete(order_id);
+                    bot.telegram.sendMessage(TG_ADMIN_GROUP_ID, successMsg, { parse_mode: 'HTML', reply_to_message_id: orderData.msgId }).catch(e => {});
                 } else {
                     sendTgNotify(successMsg);
                 }
-                
-                console.log("【USDT回调成功】订单处理完成！已通知前端和群组。");
-                res.send('success');
-            } else {
-                console.log("【USDT回调拦截】支付金额不足！");
-                res.send('amount_mismatch');
             }
-        } else {
-            console.log("【USDT回调忽略】订单已经不是待支付状态。当前状态:", order.status);
-            res.send('ok');
-        }
-    } catch (e) { 
-        console.error("【USDT回调系统报错】", e.message);
-        res.status(500).send('error'); 
-    }
-});
+        } catch (e) {}
+    });
+
+    ws.on('close', () => {
+        setTimeout(startUSDTWebSocketListener, 5000);
+    });
+
+    ws.on('error', (err) => {
+        ws.close();
+    });
+}
 app.get('/api/admin/balance_logs', adminAuth, async (req, res) => {
     try { res.json((await pool.query(`SELECT b.*, u.contact FROM balance_logs b LEFT JOIN users u ON b.user_id = u.id ${req.query.userId ? 'WHERE b.user_id = $1' : ''} ORDER BY b.created_at DESC LIMIT 200`, req.query.userId ? [req.query.userId] : [])).rows); } catch(e) { res.status(500).json([]); }
 });
@@ -1775,6 +1812,7 @@ const startServer = async () => {
 
         server.listen(PORT, () => { 
             console.log(`🚀 聚合版 Server 运行于端口 ${PORT}`); 
+            startUSDTWebSocketListener();
         });
     } catch (error) { 
         console.error("❌ 核心服务器启动失败:");
