@@ -1260,8 +1260,8 @@ orderQty = 1;
             let testUSDT = finalUSDT;
             while (!isUnique && maxRetries > 0) {
                 const randomOffset = parseFloat((Math.floor(Math.random() * 30) + 1) / 100);
-                testUSDT = parseFloat((finalUSDT + randomOffset).toFixed(4));
-                const checkRes = await client.query("SELECT order_id FROM orders WHERE status = '待支付' AND usdt_amount = $1", [testUSDT.toFixed(4)]);
+                testUSDT = parseFloat((finalUSDT + randomOffset).toFixed(2));
+                const checkRes = await client.query("SELECT order_id FROM orders WHERE status = '待支付' AND usdt_amount = $1", [testUSDT.toFixed(2)]);
                 if (checkRes.rows.length === 0) {
                     isUnique = true;
                 }
@@ -1273,10 +1273,10 @@ orderQty = 1;
         const orderId = 'XAW-' + Math.floor(10000 + Math.random() * 90000); const wallet = await getSetting('walletAddress');
         let orderStatus = finalUSDT <= 0 ? '已支付' : '待支付';
         await client.query(`INSERT INTO orders (order_id, user_id, product_name, variant_name, payment_method, usdt_amount, cny_amount, status, shipping_info, wallet, source, image_url, quantity, expires_at, balance_deducted) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW() + INTERVAL '30 minutes', $14)`,
-            [orderId, userId, prodName, finalVariantName, paymentMethod, finalUSDT.toFixed(4), cnyAmount, orderStatus, JSON.stringify({ ...shippingInfo, contact_method: contactInfo }), wallet, source || 'xaw888.com', orderImageUrl, orderQty, deduct]);
+            [orderId, userId, prodName, finalVariantName, paymentMethod, finalUSDT.toFixed(2), cnyAmount, orderStatus, JSON.stringify({ ...shippingInfo, contact_method: contactInfo }), wallet, source || 'xaw888.com', orderImageUrl, orderQty, deduct]);
         await client.query('COMMIT');
         if (orderStatus === '已支付') handleReferralBonus(userId, amount, '消费'); 
-        let notifyText = `🆕 <b>新订单提醒</b>\n\n单号: <code>${orderId}</code>\n用户: ${user ? user.contact : userId}\n联系: ${contactInfo}\n商品: ${prodName}${finalVariantName ? ` (${finalVariantName})` : ''}\n需付: ${finalUSDT.toFixed(4)} USDT`;
+        let notifyText = `🆕 <b>新订单提醒</b>\n\n单号: <code>${orderId}</code>\n用户: ${user ? user.contact : userId}\n联系: ${contactInfo}\n商品: ${prodName}${finalVariantName ? ` (${finalVariantName})` : ''}\n需付: ${finalUSDT.toFixed(2)} USDT`;
         if (usedCouponAmount > 0) {
             notifyText += `\n🎟️ <b>该用户使用了 ${usedCouponAmount} CNY的优惠劵</b>`;
         }
@@ -1330,8 +1330,8 @@ app.post('/api/recharge', async (req, res) => {
             let testUSDT = usdtAmount;
             while (!isUnique && maxRetries > 0) {
                 const randomOffset = parseFloat((Math.floor(Math.random() * 30) + 1) / 100);
-                testUSDT = parseFloat((usdtAmount + randomOffset).toFixed(4));
-                const checkRes = await pool.query("SELECT order_id FROM orders WHERE status = '待支付' AND usdt_amount = $1", [testUSDT.toFixed(4)]);
+                testUSDT = parseFloat((usdtAmount + randomOffset).toFixed(2));
+                const checkRes = await pool.query("SELECT order_id FROM orders WHERE status = '待支付' AND usdt_amount = $1", [testUSDT.toFixed(2)]);
                 if (checkRes.rows.length === 0) {
                     isUnique = true;
                 }
@@ -1341,12 +1341,12 @@ app.post('/api/recharge', async (req, res) => {
         }
         const cnyAmount = (usdtAmount * parseFloat(await getSetting('rate'))).toFixed(2);
         const orderId = 'XAW-' + Math.floor(10000 + Math.random() * 90000); const wallet = await getSetting('walletAddress');
-        await pool.query(`INSERT INTO orders (order_id, user_id, product_name, payment_method, usdt_amount, cny_amount, wallet, expires_at) VALUES ($1, $2, '余额充值', $3, $4, $5, $6, NOW() + INTERVAL '30 minutes')`, [orderId, req.body.userId, req.body.method, usdtAmount.toFixed(4), cnyAmount, wallet]);
+        await pool.query(`INSERT INTO orders (order_id, user_id, product_name, payment_method, usdt_amount, cny_amount, wallet, expires_at) VALUES ($1, $2, '余额充值', $3, $4, $5, $6, NOW() + INTERVAL '30 minutes')`, [orderId, req.body.userId, req.body.method, usdtAmount.toFixed(2), cnyAmount, wallet]);
         sendTgNotify(`💰 <b>新充值订单</b>\n单号: <code>${orderId}</code>\n用户: ${user.contact}\n金额: ${usdtAmount} USDT`);
         if (req.body.method === 'USDT' || req.body.method === 'usdt') {
             startUSDTHTTPPolling();
         }
-        notifyAdminUpdate(); res.json({ success: true, orderId, usdtAmount: usdtAmount.toFixed(4), cnyAmount, wallet });
+        notifyAdminUpdate(); res.json({ success: true, orderId, usdtAmount: usdtAmount.toFixed(2), cnyAmount, wallet });
     } catch(e) { res.json({success:false, msg: e.message}); }
 });
 app.get('/api/user/records', async (req, res) => {
@@ -1569,7 +1569,7 @@ function startUSDTHTTPPolling() {
                         processedTxIds.delete(iterator.next().value);
                     }
                     if (tx.to !== systemWallet) continue;
-                    const amount = (parseFloat(tx.value) / 1000000).toFixed(4);
+                    const amount = (parseFloat(tx.value) / 1000000).toFixed(2);
                     const order = (await pool.query("SELECT * FROM orders WHERE status = '待支付' AND usdt_amount = $1 ORDER BY created_at ASC LIMIT 1", [amount])).rows[0];
                     if (!order) continue;
                     const order_id = order.order_id;
@@ -1597,7 +1597,7 @@ function startUSDTHTTPPolling() {
                 minTimestamp = maxTime + 1;
             }
         } catch (e) {}
-    }, 10000);
+    }, 15000);
 }
 app.get('/api/admin/balance_logs', adminAuth, async (req, res) => {
     try { res.json((await pool.query(`SELECT b.*, u.contact FROM balance_logs b LEFT JOIN users u ON b.user_id = u.id ${req.query.userId ? 'WHERE b.user_id = $1' : ''} ORDER BY b.created_at DESC LIMIT 200`, req.query.userId ? [req.query.userId] : [])).rows); } catch(e) { res.status(500).json([]); }
@@ -1748,7 +1748,7 @@ io.on('connection', (socket) => {
 setInterval(async () => {
     const client = await pool.connect();
     try {
-        const timeoutOrders = await client.query(`SELECT order_id, product_name, balance_deducted, user_id FROM orders WHERE status = '待支付' AND qrcode_url IS NULL AND created_at < NOW() - INTERVAL '6 hours'`);
+        const timeoutOrders = await client.query(`SELECT order_id, product_name, balance_deducted, user_id FROM orders WHERE status = '待支付' AND qrcode_url IS NULL AND created_at < NOW() - INTERVAL '30 minutes'`);
         if (timeoutOrders.rowCount > 0) {
             await client.query('BEGIN');
             for (const order of timeoutOrders.rows) {
