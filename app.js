@@ -1507,11 +1507,37 @@ app.post('/api/admin/confirm_pay', adminAuth, async (req, res) => {
     } catch(e) { await client.query('ROLLBACK'); res.status(500).json({success:false, msg:e.message}); } finally { client.release(); }
 });
 app.post('/api/callback/usdt_notify', async (req, res) => {
-    const { order_id, amount, status } = req.body;
-    if (status !== 2 && status !== 'success' && status !== 1) return res.send('ignored'); 
+    // 【新增】第一步：打印支付网关发来的所有原始数据！这是排查回调失败的最关键信息！
+    console.log("【USDT回调接收】收到支付网关请求:", req.body);
+
+    // 【修改】兼容不同的字段名 (网关可能发的是 out_trade_no, total_amount 等)
+    const order_id = req.body.order_id || req.body.out_trade_no || req.body.tradeId || req.body.orderId;
+    const amount = req.body.amount || req.body.total_amount || req.body.pay_amount || req.body.money;
+    const status = req.body.status || req.body.trade_status || req.body.pay_status || req.body.state;
+
+    console.log(`【USDT回调解析】提取参数: 订单号=${order_id}, 金额=${amount}, 状态=${status}`);
+
+    if (!order_id) {
+        console.log("【USDT回调拦截】未找到订单号字段");
+        return res.send('missing_order_id');
+    }
+
+    // 【修改】兼容状态检查：转为字符串并全部变小写，防止网关发来大写的 "SUCCESS" 或 "PAID" 导致被拦截
+    const statusStr = String(status).toLowerCase();
+    if (statusStr !== '2' && statusStr !== 'success' && statusStr !== '1' && statusStr !== 'paid' && statusStr !== 'true') {
+        console.log("【USDT回调拦截】状态不符合成功条件。当前状态:", statusStr);
+        return res.send('ignored'); 
+    }
+
     try {
         const order = (await pool.query("SELECT * FROM orders WHERE order_id = $1", [order_id])).rows[0];
-        if (order && order.status === '待支付') {
+        if (!order) {
+            console.log("【USDT回调拦截】数据库中找不到该订单号:", order_id);
+            return res.send('order_not_found');
+        }
+
+        if (order.status === '待支付') {
+            console.log(`【USDT回调金额比对】实际支付: ${amount} USDT, 订单应付: ${order.usdt_amount} USDT`);
             if (parseFloat(amount) >= parseFloat(order.usdt_amount)) {
                 await pool.query("UPDATE orders SET status = '已支付' WHERE order_id = $1", [order_id]);
                 if (order.product_name === '余额充值') {
@@ -1536,10 +1562,21 @@ app.post('/api/callback/usdt_notify', async (req, res) => {
                 } else {
                     sendTgNotify(successMsg);
                 }
+                
+                console.log("【USDT回调成功】订单处理完成！已通知前端和群组。");
                 res.send('success');
-            } else res.send('amount_mismatch');
-        } else res.send('ok');
-    } catch (e) { res.status(500).send('error'); }
+            } else {
+                console.log("【USDT回调拦截】支付金额不足！");
+                res.send('amount_mismatch');
+            }
+        } else {
+            console.log("【USDT回调忽略】订单已经不是待支付状态。当前状态:", order.status);
+            res.send('ok');
+        }
+    } catch (e) { 
+        console.error("【USDT回调系统报错】", e.message);
+        res.status(500).send('error'); 
+    }
 });
 app.get('/api/admin/balance_logs', adminAuth, async (req, res) => {
     try { res.json((await pool.query(`SELECT b.*, u.contact FROM balance_logs b LEFT JOIN users u ON b.user_id = u.id ${req.query.userId ? 'WHERE b.user_id = $1' : ''} ORDER BY b.created_at DESC LIMIT 200`, req.query.userId ? [req.query.userId] : [])).rows); } catch(e) { res.status(500).json([]); }
