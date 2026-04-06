@@ -267,6 +267,7 @@ await client.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS source TEXT"); } 
         await client.query(`CREATE TABLE IF NOT EXISTS categories (name TEXT PRIMARY KEY, priority INT DEFAULT 0);`);
         await client.query(`CREATE TABLE IF NOT EXISTS balance_logs (id SERIAL PRIMARY KEY, user_id BIGINT, type TEXT, amount NUMERIC(10, 4), remark TEXT, balance_after NUMERIC(10, 4), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
         await client.query(`CREATE TABLE IF NOT EXISTS site_visits (id SERIAL PRIMARY KEY, domain TEXT, visit_date DATE DEFAULT CURRENT_DATE, count INT DEFAULT 1, UNIQUE(domain, visit_date));`);
+        await client.query(`CREATE TABLE IF NOT EXISTS coupons (code TEXT PRIMARY KEY, amount NUMERIC(10, 2), expires_at TIMESTAMP, is_used BOOLEAN DEFAULT FALSE);`);
         try { await client.query("ALTER TABLE balance_logs ADD COLUMN IF NOT EXISTS balance_after NUMERIC(10, 4)"); } catch(e){ console.error("扩展日志字段失败:", e.message); }
 
         const defaults = [['rate', '7.0'], ['feeRate', '0'], ['announcement', '欢迎来到 NEXUS 商城'], ['popup', 'true'], ['walletAddress', '请联系客服获取地址']];
@@ -308,7 +309,6 @@ const broadcastGlobalUpdate = async () => {
         const rate = await getSetting('rate');
         const feeRate = await getSetting('feeRate');
         const announcement = await getSetting('announcement');
-        const hiring = await pool.query('SELECT * FROM hiring');
         const popup = await getSetting('popup');
         const wallet = await getSetting('walletAddress');
 
@@ -317,7 +317,7 @@ const broadcastGlobalUpdate = async () => {
         const pMap = {}; prioritiesRes.rows.forEach(r => pMap[r.name] = r.priority);
         const categories = distinctCats.sort((a, b) => (pMap[b] || 0) - (pMap[a] || 0));
 
-        io.emit('global_update', { products: prods.rows, categories, hiring: hiring.rows, showPopup: popup === 'true', wallet, rate: parseFloat(rate), feeRate: parseFloat(feeRate), announcement });
+        io.emit('global_update', { products: prods.rows, categories, hiring: hiring.rows, showPopup: popup, wallet, rate: parseFloat(rate), feeRate: parseFloat(feeRate), announcement });
     } catch(e) { console.error("Broadcast Error", e); }
 };
 
@@ -774,6 +774,14 @@ bot.on('text', async (ctx, next) => {
             const replyId = ctx.message.reply_to_message.message_id;
             let target = warningMessages.get(replyId) || unauthorizedMessages.get(replyId) || { userId: ctx.message.reply_to_message.from.id, userName: ctx.message.reply_to_message.from.first_name };
             
+            if (text.startsWith('优惠劵 ')) {
+                const amount = parseFloat(text.split(' ')[1]);
+                if (!isNaN(amount) && amount > 0) {
+                    const code = 'xaw' + Math.floor(1000 + Math.random() * 9000);
+                    await pool.query(`INSERT INTO coupons (code, amount, expires_at) VALUES ($1, $2, NOW() + INTERVAL '30 minutes')`, [code, amount]);
+                    return ctx.reply(`🎁 <b>优惠劵生成成功</b>\n\n立减金额: <b>${amount}</b>\n有效期: <b>30分钟</b>\n\n点击下方验证码复制给用户：\n<code>${code}</code>\n\n⚠️ 温馨提示：请告诉用户在结算时填写此优惠码即可立减 ${amount}！`, { parse_mode: 'HTML' });
+                }
+            }
             if (text.startsWith('打款 ')) {
                 const amount = text.split(' ')[1]; 
                 if (amount) {
@@ -1050,7 +1058,7 @@ app.get('/api/public/data', async (req, res) => {
             rate: parseFloat(rate || 0),
             feeRate: parseFloat(feeRate || 0),
             announcement: announcement || "暂无公告",
-            showPopup: popup === 'true',
+            showPopup: popup,
             wallet: wallet || ""
         });
     } catch (e) {
@@ -1167,7 +1175,7 @@ app.post('/api/user/change-password', async (req, res) => {
     } catch (e) { res.json({success: false, msg: '服务器错误'}); }
 });
 app.post('/api/order', async (req, res) => {
-    const { userId, productId, variantName, variantPrice, cartItems, paymentMethod, shippingInfo, useBalance, contactInfo, source } = req.body;
+    const { userId, productId, variantName, variantPrice, cartItems, paymentMethod, shippingInfo, useBalance, contactInfo, source, couponCode } = req.body;
     if (contactInfo && contactInfo.length > 200) return res.json({ success: false, msg: '联系方式过长' });
     const client = await pool.connect();
     try {
@@ -1212,6 +1220,15 @@ orderQty = 1;
 }
         let finalUSDT = amount;
         let deduct = 0;
+
+        if (couponCode) {
+            const couponRes = await client.query('SELECT * FROM coupons WHERE code = $1 AND is_used = FALSE AND expires_at > NOW() FOR UPDATE', [couponCode]);
+            if (couponRes.rows.length === 0) throw new Error('优惠劵无效或已过期');
+            const couponAmount = parseFloat(couponRes.rows[0].amount);
+            finalUSDT = Math.max(0, finalUSDT - couponAmount);
+            await client.query('UPDATE coupons SET is_used = TRUE WHERE code = $1', [couponCode]);
+        }
+
         if(useBalance && user && parseFloat(user.balance) > 0) {
             deduct = Math.min(parseFloat(user.balance), amount); finalUSDT -= deduct;
             await client.query('UPDATE users SET balance = balance - $1 WHERE id = $2', [deduct, userId]);
@@ -1296,6 +1313,13 @@ app.post('/api/order/confirm-payment', upload.single('file'), async (req, res) =
     } catch(e) { res.json({success:false, msg: "网络繁忙，请联系客服核实"}); }
 });
 app.post('/api/order/report-qr-issue', async (req, res) => { sendTgNotify(`🚨 <b>二维码异常反馈</b>\n单号: <code>${req.body.orderId}</code>`); res.json({success:true}); });
+app.post('/api/coupon/verify', async (req, res) => {
+    try {
+        const couponRes = await pool.query('SELECT amount FROM coupons WHERE code = $1 AND is_used = FALSE AND expires_at > NOW()', [req.body.code]);
+        if (couponRes.rows.length > 0) res.json({ success: true, amount: parseFloat(couponRes.rows[0].amount) });
+        else res.json({ success: false, msg: '优惠劵无效或已过期' });
+    } catch(e) { res.json({ success: false, msg: '验证失败' }); }
+});
 app.post('/api/withdraw', upload.single('file'), async (req, res) => {
     try {
         const amount = parseFloat(req.body.amount); if (isNaN(amount) || amount <= 0) return res.json({ success: false, msg: '金额必须大于0' });
@@ -1339,7 +1363,7 @@ app.get('/api/admin/all', adminAuth, async (req, res) => {
             products: (await pool.query('SELECT * FROM products ORDER BY id DESC')).rows,
             hiring: (await pool.query('SELECT * FROM hiring')).rows,
             visits: visitStats,
-            chats, rate: await getSetting('rate'), feeRate: await getSetting('feeRate'), announcement: await getSetting('announcement'), popup: (await getSetting('popup')) === 'true'
+            chats, rate: await getSetting('rate'), feeRate: await getSetting('feeRate'), announcement: await getSetting('announcement'), popup: await getSetting('popup')
         });
     } catch(e) { res.status(500).json({}); }
 });
@@ -1654,6 +1678,7 @@ setInterval(async () => {
 
 cron.schedule('0 0 * * *', async () => {
     try {
+        await pool.query("DELETE FROM coupons WHERE expires_at < NOW()");
         await pool.query("DELETE FROM orders WHERE created_at < NOW() - INTERVAL '3 days'");
         await pool.query("DELETE FROM withdrawals WHERE created_at < NOW() - INTERVAL '3 days'");
         await pool.query("DELETE FROM chats WHERE created_at < NOW() - INTERVAL '3 days'");
