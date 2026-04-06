@@ -808,15 +808,17 @@ bot.on('text', async (ctx, next) => {
                 const promptMsg = await ctx.reply("请选择你兄弟的出行方式：", { reply_markup: { inline_keyboard: [[{ text: "🛣️ 走小路", callback_data: "agent_land" }], [{ text: "✈️ 坐飞机", callback_data: "agent_flight" }]] } });
                 pendingAgentAuth.set(promptMsg.message_id, target); warningMessages.delete(replyId);
             } 
-            else if (text === '授权') {
-                if (!target) return;
-                authorizedUsers.set(target.userId, 'user'); saveAuth();
-                try { await bot.telegram.restrictChatMember(ctx.chat.id, target.userId, { permissions: { can_send_messages: true, can_send_photos: true, can_send_videos: true, can_send_other_messages: true, can_add_web_page_previews: true, can_invite_users: true } }); } catch (e) {}
-                await ctx.reply(t(ctx.chat.id, 'auth_success', { name: target.userName })); warningMessages.delete(replyId);
-            }
-        }
-    }
-    await next();
+           else if (text === '授权') {
+                if (!target) return;
+                authorizedUsers.set(target.userId, 'user'); saveAuth();
+                try { await bot.telegram.restrictChatMember(ctx.chat.id, target.userId, { permissions: { can_send_messages: true, can_send_photos: true, can_send_videos: true, can_send_other_messages: true, can_add_web_page_previews: true, can_invite_users: true } }); } catch (e) {}
+                await ctx.reply(t(ctx.chat.id, 'auth_success', { name: target.userName })); warningMessages.delete(replyId);
+            }
+        }
+    } 
+} 
+
+    await next();
 });
 
 bot.on('photo', async (ctx, next) => {
