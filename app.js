@@ -306,6 +306,7 @@ const setSetting = async (key, value) => { await pool.query('INSERT INTO setting
 const broadcastGlobalUpdate = async () => {
     try {
         const prods = await pool.query('SELECT * FROM products ORDER BY is_pinned DESC, is_hot DESC, hot_time ASC, id DESC');
+        const hiringRes = await pool.query('SELECT * FROM hiring');
         const rate = await getSetting('rate');
         const feeRate = await getSetting('feeRate');
         const announcement = await getSetting('announcement');
@@ -317,10 +318,9 @@ const broadcastGlobalUpdate = async () => {
         const pMap = {}; prioritiesRes.rows.forEach(r => pMap[r.name] = r.priority);
         const categories = distinctCats.sort((a, b) => (pMap[b] || 0) - (pMap[a] || 0));
 
-        io.emit('global_update', { products: prods.rows, categories, hiring: hiring.rows, showPopup: popup, wallet, rate: parseFloat(rate), feeRate: parseFloat(feeRate), announcement });
+        io.emit('global_update', { products: prods.rows, categories, hiring: hiringRes.rows, showPopup: popup, wallet, rate: parseFloat(rate), feeRate: parseFloat(feeRate), announcement });
     } catch(e) { console.error("Broadcast Error", e); }
 };
-
 const uploadToCloud = (buffer) => {
     return new Promise((resolve, reject) => {
         const uploadStream = cloudinary.uploader.upload_stream({ folder: "nexus_store_products" }, (error, result) => {
@@ -924,6 +924,7 @@ bot.on('callback_query', async (ctx) => {
         const notifySid = `user_${userId}`; const rejectMsg = `❌ 订单 ${orderId} 支付核实失败。\n原因：客服反应这笔款项未收到,请稍等客服稍后会于你联系。\n订单状态已重置，请核对后重新上传凭证。`;
         const resDb = await pool.query("INSERT INTO chats (session_id, sender, content, msg_type) VALUES ($1, 'admin', $2, 'text') RETURNING created_at", [notifySid, rejectMsg]);
         io.to(notifySid).emit('new_message', { session_id: notifySid, sender: 'admin', content: rejectMsg, msg_type: 'text', created_at: resDb.rows[0].created_at });
+        io.to(notifySid).emit('order_update');
         return ctx.editMessageCaption(msg.caption ? msg.caption + "\n\n❌ <b>已驳回 (重置为待支付)</b>" : "❌ <b>已驳回</b>", { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } });
     }
 
@@ -1300,7 +1301,7 @@ orderQty = 1;
         if (paymentMethod === 'USDT' || paymentMethod === 'usdt') {
             startUSDTHTTPPolling();
         }
-        notifyAdminUpdate(); res.json({ success: true, orderId, usdtAmount: finalUSDT.toFixed(4), cnyAmount, wallet, status: orderStatus });
+        notifyAdminUpdate(); res.json({ success: true, orderId, usdtAmount: finalUSDT.toFixed(2), cnyAmount, wallet, status: orderStatus });
     } catch(e) { await client.query('ROLLBACK'); res.json({success:false, msg: e.message}); } finally { client.release(); }
 });
 app.get('/api/order', async (req, res) => { try { res.json((await pool.query(`SELECT * FROM orders WHERE user_id = $1 ORDER BY created_at DESC`, [req.query.userId])).rows); } catch(e) { res.json([]); } });
