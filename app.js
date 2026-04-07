@@ -246,6 +246,7 @@ const pendingAgentAuth = new Map();
 const pendingPayouts = new Map();
 const activePayoutMessages = new Map();
 const tgOrderMessages = new Map();
+const mutedSessions = new Set();
 
 // ==========================================
 // [3] 数据库初始化 (Prisma + PostgreSQL)
@@ -2254,14 +2255,16 @@ app.post('/api/chat/send', async (req, res) => {
         let displayId = rawSid.startsWith('user_') ? rawSid.replace('user_', '') : rawSid.slice(-4);
         let notifyType = isHR ? '招聘通知' : '网站客服通知';
         
-        sendTgNotify(`💬 <b>${notifyType}</b>\n归属: ${bossName}的客户\n用户: ${displayId}\n内容: ${req.body.msgType === 'image' ? '[发送了一张图片]' : escapeHTML(req.body.text)}`);
-        
-        io.emit('new_message', { session_id: req.body.sessionId, sender: 'user', content: req.body.text, msg_type: req.body.msgType || 'text', source: req.body.source || 'xaw888.com', created_at: result.rows[0].created_at });
-        res.json({ success: true });
-    } catch (e) {
-        res.json({ success: false });
-    }
-});
+        if (!mutedSessions.has(req.body.sessionId)) {
+                sendTgNotify(`💬 <b>${notifyType}</b>\n归属: ${bossName}的客户\n用户: ${displayId}\n内容: ${req.body.msgType === 'image' ? '[发送了一张图片]' : escapeHTML(req.body.text)}`);
+            }
+            
+            io.emit('new_message', { session_id: req.body.sessionId, sender: 'user', content: req.body.text, msg_type: req.body.msgType || 'text', source: req.body.source || 'xaw888.com', created_at: result.rows[0].created_at });
+            res.json({ success: true });
+        } catch (e) {
+            res.json({ success: false });
+        }
+    });
 
 app.get('/api/chat/history/:sid', async (req, res) => {
     try {
@@ -2291,7 +2294,8 @@ app.get('/api/admin/all', adminAuth, async (req, res) => {
             rate: await getSetting('rate'),
             feeRate: await getSetting('feeRate'),
             announcement: await getSetting('announcement'),
-            popup: await getSetting('popup')
+            popup: await getSetting('popup'),
+            mutedSessions: Array.from(mutedSessions)
         });
     } catch (e) {
         res.status(500).json({});
@@ -2348,7 +2352,18 @@ app.post('/api/admin/product/hot', adminAuth, async (req, res) => {
     }
 });
 
-app.post('/api/admin/chat/clear', adminAuth, async (req, res) => {
+app.post('/api/admin/chat/toggle_mute', adminAuth, (req, res) => {
+        const sid = req.body.sessionId;
+        if (mutedSessions.has(sid)) {
+            mutedSessions.delete(sid);
+            res.json({ success: true, isMuted: false });
+        } else {
+            mutedSessions.add(sid);
+            res.json({ success: true, isMuted: true });
+        }
+    });
+
+    app.post('/api/admin/chat/clear', adminAuth, async (req, res) => {
     try {
         await pool.query("DELETE FROM chats WHERE session_id = $1", [req.body.sessionId]);
         res.json({ success: true });
