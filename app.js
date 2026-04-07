@@ -2245,22 +2245,24 @@ app.post('/api/withdraw', upload.single('file'), async (req, res) => {
 });
 
 app.post('/api/chat/send', async (req, res) => {
-    try {
-        const result = await pool.query('INSERT INTO chats (session_id, sender, content, msg_type, source) VALUES ($1, $2, $3, $4, $5) RETURNING created_at', [req.body.sessionId, 'user', req.body.text, req.body.msgType || 'text', req.body.source || 'xaw888.com']);
-   
-        const sourceDomain = req.body.source || 'xaw888.com';
-        const bossName = sourceDomain.includes('8888') ? '龍哥' : 'Boss';
-        let isHR = req.body.sessionId.startsWith('hr_');
-        let rawSid = req.body.sessionId.replace('hr_', '');
-        let displayId = rawSid.startsWith('user_') ? rawSid.replace('user_', '') : rawSid.slice(-4);
-        let notifyType = isHR ? '招聘通知' : '网站客服通知';
-        
-        if (!mutedSessions.has(req.body.sessionId)) {
-                sendTgNotify(`💬 <b>${notifyType}</b>\n归属: ${bossName}的客户\n用户: ${displayId}\n内容: ${req.body.msgType === 'image' ? '[发送了一张图片]' : escapeHTML(req.body.text)}`);
-            }
-            
-            io.emit('new_message', { session_id: req.body.sessionId, sender: 'user', content: req.body.text, msg_type: req.body.msgType || 'text', source: req.body.source || 'xaw888.com', created_at: result.rows[0].created_at });
-            res.json({ success: true });
+    try {
+        const result = await pool.query('INSERT INTO chats (session_id, sender, content, msg_type, source) VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at', [req.body.sessionId, 'user', req.body.text, req.body.msgType || 'text', req.body.source || 'xaw888.com']);
+   
+        const sourceDomain = req.body.source || 'xaw888.com';
+        const bossName = sourceDomain.includes('8888') ? '龍哥' : 'Boss';
+        let isHR = req.body.sessionId.startsWith('hr_');
+        let rawSid = req.body.sessionId.replace('hr_', '');
+        let displayId = rawSid.startsWith('user_') ? rawSid.replace('user_', '') : rawSid.slice(-4);
+        let notifyType = isHR ? '招聘通知' : '网站客服通知';
+        
+        if (!mutedSessions.has(req.body.sessionId)) {
+                        sendTgNotify(`💬 <b>${notifyType}</b>\n归属: ${bossName}的客户\n用户: ${displayId}\n内容: ${req.body.msgType === 'image' ? '[发送了一张图片]' : escapeHTML(req.body.text)}`);
+                    }
+                    
+                    const messageData = { id: result.rows[0].id, session_id: req.body.sessionId, sender: 'user', content: req.body.text, msg_type: req.body.msgType || 'text', source: req.body.source || 'xaw888.com', created_at: result.rows[0].created_at };
+                    io.to(req.body.sessionId).emit('new_message', messageData);
+                    io.to('admin_room').emit('new_message', messageData);
+                    res.json({ success: true });
         } catch (e) {
             res.json({ success: false });
         }
@@ -2285,18 +2287,19 @@ app.get('/api/admin/all', adminAuth, async (req, res) => {
         const visitStats = await getVisitStats();
         
         res.json({
-            users: (await pool.query('SELECT * FROM users ORDER BY created_at DESC')).rows,
-            orders: (await pool.query('SELECT * FROM orders ORDER BY created_at DESC')).rows,
-            products: (await pool.query('SELECT * FROM products ORDER BY id DESC')).rows,
-            hiring: (await pool.query('SELECT * FROM hiring')).rows,
-            visits: visitStats,
-            chats,
-            rate: await getSetting('rate'),
-            feeRate: await getSetting('feeRate'),
-            announcement: await getSetting('announcement'),
-            popup: await getSetting('popup'),
-            mutedSessions: Array.from(mutedSessions)
-        });
+            users: (await pool.query('SELECT * FROM users ORDER BY created_at DESC')).rows,
+            orders: (await pool.query('SELECT * FROM orders ORDER BY created_at DESC')).rows,
+            products: (await pool.query('SELECT * FROM products ORDER BY id DESC')).rows,
+            hiring: (await pool.query('SELECT * FROM hiring')).rows,
+            visits: visitStats,
+            chats,
+            rate: await getSetting('rate'),
+            feeRate: await getSetting('feeRate'),
+            announcement: await getSetting('announcement'),
+            popup: await getSetting('popup'),
+            mutedSessions: Array.from(mutedSessions),
+            quickReplies: await getSetting('quick_replies') || '您好，请问有什么可以帮您？\n请发送支付截图核实验证。'
+        });
     } catch (e) {
         res.status(500).json({});
     }
@@ -2321,12 +2324,14 @@ app.post('/api/admin/user/balance', adminAuth, async (req, res) => {
 });
 
 app.post('/api/admin/chat/initiate', adminAuth, async (req, res) => {
-    try {
-        const sid = `user_${req.body.userId}`;
-        const result = await pool.query("INSERT INTO chats (session_id, sender, content, msg_type, is_initiate) VALUES ($1, 'admin', '客服已接入', 'text', TRUE) RETURNING created_at", [sid]);
-        io.emit('new_message', { session_id: sid, sender: 'admin', content: '客服已接入', msg_type: 'text', created_at: result.rows[0].created_at });
-        res.json({ success: true, sessionId: sid });
-    } catch (e) {
+    try {
+        const sid = `user_${req.body.userId}`;
+        const result = await pool.query("INSERT INTO chats (session_id, sender, content, msg_type, is_initiate) VALUES ($1, 'admin', '客服已接入', 'text', TRUE) RETURNING id, created_at", [sid]);
+        const messageData = { id: result.rows[0].id, session_id: sid, sender: 'admin', content: '客服已接入', msg_type: 'text', created_at: result.rows[0].created_at };
+        io.to(sid).emit('new_message', messageData);
+        io.to('admin_room').emit('new_message', messageData);
+        res.json({ success: true, sessionId: sid });
+    } catch (e) {
         res.status(500).json({ success: false, msg: e.message });
     }
 });
@@ -2382,11 +2387,13 @@ app.post('/api/chat/upload', upload.single('file'), async (req, res) => {
 });
 
 app.post('/api/admin/reply', adminAuth, async (req, res) => {
-    try {
-        const result = await pool.query("INSERT INTO chats (session_id, sender, content, msg_type) VALUES ($1, 'admin', $2, $3) RETURNING created_at", [req.body.sessionId, req.body.text, req.body.msgType || 'text']);
-        io.emit('new_message', { session_id: req.body.sessionId, sender: 'admin', content: req.body.text, msg_type: req.body.msgType || 'text', created_at: result.rows[0].created_at });
-        res.json({ success: true });
-    } catch (e) {
+    try {
+        const result = await pool.query("INSERT INTO chats (session_id, sender, content, msg_type) VALUES ($1, 'admin', $2, $3) RETURNING id, created_at", [req.body.sessionId, req.body.text, req.body.msgType || 'text']);
+        const messageData = { id: result.rows[0].id, session_id: req.body.sessionId, sender: 'admin', content: req.body.text, msg_type: req.body.msgType || 'text', created_at: result.rows[0].created_at };
+        io.to(req.body.sessionId).emit('new_message', messageData);
+        io.to('admin_room').emit('new_message', messageData);
+        res.json({ success: true });
+    } catch (e) {
         res.status(500).json({ success: false, msg: e.message });
     }
 });
@@ -2433,16 +2440,21 @@ app.post('/api/admin/update/announcement', adminAuth, async (req, res) => {
     res.json({ success: true });
 });
 
-app.post('/api/admin/update/popup', adminAuth, async (req, res) => {
-    await setSetting('popup', req.body.open);
-    await broadcastGlobalUpdate();
-    res.json({ success: true });
+app.post('/api/admin/update/quick_replies', adminAuth, async (req, res) => {
+    await setSetting('quick_replies', req.body.text);
+    res.json({ success: true });
 });
 
-app.post('/api/admin/category/priority', adminAuth, async (req, res) => {
-    try {
-        await pool.query('INSERT INTO categories (name, priority) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET priority = $2', [req.body.name, parseInt(req.body.priority)]);
-        await broadcastGlobalUpdate();
+app.post('/api/admin/chat/recall', adminAuth, async (req, res) => {
+    try {
+        await pool.query("UPDATE chats SET content = '此消息已撤回', msg_type = 'system' WHERE id = $1", [req.body.messageId]);
+        io.to(req.body.sessionId).emit('message_recalled', { messageId: req.body.messageId });
+        io.to('admin_room').emit('message_recalled', { messageId: req.body.messageId, sessionId: req.body.sessionId });
+        res.json({ success: true });
+    } catch (e) {
+        res.json({ success: false });
+    }
+});
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ success: false, msg: e.message });
@@ -2656,9 +2668,13 @@ async function startUSDTHTTPPolling() {
 // [7] Socket.IO 融合逻辑
 // ==========================================
 io.on('connection', (socket) => {
-    socket.on('join_room', (room) => { socket.join(room); });
+    socket.on('join_room', (room) => {
+        if (room !== 'admin_room') {
+            socket.join(room);
+        }
+    });
 
-    const { userId, bossId } = socket.handshake.query;
+    const { userId, bossId } = socket.handshake.query;
     if (userId) {
         socket.join(userId);
         socket.userId = userId;
@@ -2671,11 +2687,16 @@ io.on('connection', (socket) => {
         if (typeof cb === 'function') cb(generateShortId());
     });
 
-    socket.on('join', async ({ userId, isAdmin, bossId }) => {
-        if (isAdmin) {
-            socket.join('admin_room');
-            socket.emit('online_users_list', Array.from(onlineUsers));
-        } else if (userId) {
+    socket.on('join', async ({ userId, isAdmin, bossId, token }) => {
+        if (isAdmin) {
+            // 校验 Token，防止伪造管理员身份窃听全站聊天
+            if (token === process.env.ADMIN_TOKEN || token === await getSetting('admin_password')) {
+                socket.join('admin_room');
+                socket.emit('online_users_list', Array.from(onlineUsers));
+            } else {
+                socket.emit('force_logout');
+            }
+        } else if (userId) {
             try {
                 const existingUser = await prisma.user.findUnique({ where: { id: userId } });
                 if (existingUser && existingUser.isBlocked) {
