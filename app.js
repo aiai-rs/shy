@@ -2455,11 +2455,6 @@ app.post('/api/admin/chat/recall', adminAuth, async (req, res) => {
         res.json({ success: false });
     }
 });
-        res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ success: false, msg: e.message });
-    }
-});
 
 app.post('/api/admin/product', adminAuth, upload.single('file'), async (req, res) => {
     try {
