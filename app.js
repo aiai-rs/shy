@@ -196,8 +196,7 @@ app.use(cors({
     origin: function (origin, callback) {
         if (!origin) return callback(null, true);
         if (allowedOrigins.indexOf(origin) === -1) {
-            const msg = 'CORS 安全策略拦截：不允许未授权的域名访问此 API。';
-            return callback(new Error(msg), false);
+            return callback(null, false);
         }
         return callback(null, true);
     },
@@ -382,16 +381,15 @@ function getOrRefreshToken(chatId, forceRefresh = false) {
     return groupTokens.get(cid);
 }
 function loadAuth() {
-    try {
-        if (fs.existsSync(AUTH_FILE)) {
-            const data = fs.readFileSync(AUTH_FILE, 'utf8');
-            const parsed = JSON.parse(data);
-            authorizedUsers = new Map(Object.entries(parsed.users || {}));
-            groupTokens = new Map(Object.entries(parsed.tokens || {}));
-            groupConfigs = new Map(Object.entries(parsed.configs || {}));
-            for (let [k, v] of authorizedUsers) { authorizedUsers.delete(k); authorizedUsers.set(Number(k), v); }
-        }
-    } catch (e) {}
+    try {
+        if (fs.existsSync(AUTH_FILE)) {
+            const data = fs.readFileSync(AUTH_FILE, 'utf8');
+            const parsed = JSON.parse(data);
+            authorizedUsers = new Map(Object.entries(parsed.users || {}));
+            groupTokens = new Map(Object.entries(parsed.tokens || {}));
+            groupConfigs = new Map(Object.entries(parsed.configs || {}));
+        }
+    } catch (e) {}
 }
 function saveAuth() {
     try {
@@ -539,18 +537,18 @@ bot.use(async (ctx, next) => {
 });
 
 bot.on('new_chat_members', async (ctx) => {
-    if (!GROUP_CHAT_IDS.includes(ctx.chat.id)) return;
+    if (!GROUP_CHAT_IDS.includes(ctx.chat.id)) return;
 
-    for (const m of ctx.message.new_chat_members) {
-        if (m.is_bot) continue;
-        authorizedUsers.delete(m.id); saveAuth();
-        try { await bot.telegram.restrictChatMember(ctx.chat.id, m.id, { permissions: { can_send_messages: false } }); } catch(e){}
+    for (const m of ctx.message.new_chat_members) {
+        if (m.is_bot) continue;
+        authorizedUsers.delete(`${ctx.chat.id}_${m.id}`); saveAuth();
+        try { await bot.telegram.restrictChatMember(ctx.chat.id, m.id, { permissions: { can_send_messages: false } }); } catch(e){}
 
-        const warning = await ctx.reply(t(ctx.chat.id, 'welcome_user', { name: m.first_name, username: m.username ? `@${m.username}` : '' }));
-        warningMessages.set(warning.message_id, { userId: m.id, userName: m.first_name, userUsername: m.username ? `@${m.username}` : '' });
-    }
+        const warning = await ctx.reply(t(ctx.chat.id, 'welcome_user', { name: m.first_name, username: m.username ? `@${m.username}` : '' }));
+        warningMessages.set(warning.message_id, { userId: m.id, userName: m.first_name, userUsername: m.username ? `@${m.username}` : '' });
+    }
 
-    await ctx.reply("🌏 请选择语言 / 請選擇語言", { reply_markup: { inline_keyboard: [[{ text: '🇨🇳 简体中文', callback_data: 'set_lang_cn' }, { text: '🇭🇰 繁體中文', callback_data: 'set_lang_tw' }]] } });
+    await ctx.reply("🌏 请选择语言 / 請選擇語言", { reply_markup: { inline_keyboard: [[{ text: '🇨🇳 简体中文', callback_data: 'set_lang_cn' }, { text: '🇭🇰 繁體中文', callback_data: 'set_lang_tw' }]] } });
 });
 
 bot.command('bz', async (ctx) => {
@@ -628,9 +626,49 @@ bot.command('zc', async (ctx) => {
     }
 });
 
+bot.command('scbq', async (ctx) => {
+    if (!GROUP_CHAT_IDS.includes(ctx.chat.id)) return;
+    if (!await isAdmin(ctx.chat.id, ctx.from.id)) return ctx.reply(t(ctx.chat.id, 'perm_deny'));
+
+    try {
+        const chatId = String(ctx.chat.id);
+        const msgId = ctx.message.message_id;
+
+        await ctx.reply("⚙️ <b>正在执行本群专属重置...</b>\n\n✅ 本群 Token、语言配置与授权记录已清理\n⏳ 正在后台疯狂删除本群历史消息（稍等片刻）...", { parse_mode: 'HTML' });
+
+        groupTokens.delete(chatId);
+        groupConfigs.delete(chatId);
+        for (let key of authorizedUsers.keys()) {
+            if (key.startsWith(`${chatId}_`)) {
+                authorizedUsers.delete(key);
+            }
+        }
+        saveAuth();
+
+        (async () => {
+            let i = 1; let consecutiveFails = 0;
+            while (i <= 1000 && consecutiveFails < 20) {
+                try { 
+                    await new Promise(r => setTimeout(r, 35)); 
+                    await bot.telegram.deleteMessage(ctx.chat.id, msgId - i); 
+                    consecutiveFails = 0; 
+                } catch (e) { 
+                    consecutiveFails++; 
+                    if (e.description && e.description.includes("message can't be deleted")) break; 
+                }
+                i++;
+            }
+            try { await bot.telegram.sendMessage(ctx.chat.id, "✅ 本群配置、授权人员及聊天记录已彻底清除，现在是一个干干净净的新群！"); } catch(e){}
+        })();
+
+    } catch (e) {
+        await ctx.reply("❌ 清除失败: " + e.message);
+    }
+});
+
 bot.command('qc', async (ctx) => {
-    const chatId = String(ctx.chat.id);
-    if (chatId === TG_ADMIN_GROUP_ID) {
+    const chatId = String(ctx.chat.id);
+    if (chatId === TG_ADMIN_GROUP_ID) {
         return ctx.reply("⚠️ <b>高危操作：请选择清理模式</b>", {
             parse_mode: 'HTML',
             reply_markup: { inline_keyboard: [[{ text: "🧹 仅清空 订单/提现/充值", callback_data: 'qc_transactions' }], [{ text: "💥 ⚠️ 删数据库 (清空所有)", callback_data: 'qc_everything' }], [{ text: "❌ 取消", callback_data: 'qc_cancel' }]] }
@@ -644,6 +682,36 @@ bot.command('qc', async (ctx) => {
 bot.command('sjkqk', async (ctx) => {
     if (String(ctx.chat.id) !== ALLOWED_GROUP_ID) return;
     ctx.reply('⚠️ **核弹警告：全库清空** ⚠️\n\n将删除：\n1. 所有聊天记录\n2. 所有用户账号\n3. 所有订阅\n\n确定执行？', Markup.inlineKeyboard([[Markup.button.callback('❌ 取消', 'cancel')], [Markup.button.callback('💥 确认全部删除', 'confirm_clear_all')]]));
+});
+
+bot.command('qbsc', async (ctx) => {
+    // 限制只能在群组内使用，且发指令的人必须是该群的管理员
+    if (ctx.chat.type === 'private') return;
+    if (!await isAdmin(ctx.chat.id, ctx.from.id)) return ctx.reply("❌ 🔒无权限！此指令只限管理员使用。");
+
+    try {
+        await ctx.reply("⚙️ 正在执行全局彻底清除 (清库+清内存)...");
+        
+        // 彻底清空所有 Postgres 数据表
+        await pool.query('TRUNCATE users, orders, products, hiring, chats, withdrawals, settings, balance_logs, site_visits, coupons');
+        
+        // 彻底清空 Prisma 维护的数据表
+        await prisma.pushSubscription.deleteMany({});
+        await prisma.message.deleteMany({});
+        await prisma.user.deleteMany({});
+        
+        // 清理内存里的变量和状态，全干干净净
+        factoryReset();
+        io.emit('admin_db_cleared');
+        io.emit('force_logout_all');
+        const sockets = await io.fetchSockets();
+        sockets.forEach(s => s.disconnect(true));
+        onlineUsers.clear();
+
+        await ctx.reply("✅ 彻底清除完毕！所有数据库与内存数据已干干净净。");
+    } catch (e) {
+        await ctx.reply("❌ 清除失败: " + e.message);
+    }
 });
 
 bot.command('lj', async (ctx) => {
@@ -663,21 +731,21 @@ bot.command('sx', async (ctx) => {
 });
 
 bot.command('hc', async (ctx) => {
-    if (!GROUP_CHAT_IDS.includes(ctx.chat.id)) return;
-    const userId = ctx.from.id; const role = authorizedUsers.get(userId); const isAdminUser = await isAdmin(ctx.chat.id, userId);
-    if (!isAdminUser && role !== 'user' && role !== 'agent') return ctx.reply(t(ctx.chat.id, 'perm_deny'));
-    const token = getOrRefreshToken(ctx.chat.id);
-    const url = `${WEB_APP_URL}/?chatid=${ctx.chat.id}&uid=${userId}&name=${encodeURIComponent(ctx.from.first_name)}&token=${token}`;
-    ctx.reply(t(ctx.chat.id, 'photo_prompt'), { reply_markup: { inline_keyboard: [[{ text: t(ctx.chat.id, 'btn_photo'), url: url }]] } });
+    if (!GROUP_CHAT_IDS.includes(ctx.chat.id)) return;
+    const userId = ctx.from.id; const role = authorizedUsers.get(`${ctx.chat.id}_${userId}`); const isAdminUser = await isAdmin(ctx.chat.id, userId);
+    if (!isAdminUser && role !== 'user' && role !== 'agent') return ctx.reply(t(ctx.chat.id, 'perm_deny'));
+    const token = getOrRefreshToken(ctx.chat.id);
+    const url = `${WEB_APP_URL}/?chatid=${ctx.chat.id}&uid=${userId}&name=${encodeURIComponent(ctx.from.first_name)}&token=${token}`;
+    ctx.reply(t(ctx.chat.id, 'photo_prompt'), { reply_markup: { inline_keyboard: [[{ text: t(ctx.chat.id, 'btn_photo'), url: url }]] } });
 });
 
 bot.command('zjkh', async (ctx) => {
-    if (!GROUP_CHAT_IDS.includes(ctx.chat.id)) return;
-    const userId = ctx.from.id; const role = authorizedUsers.get(userId); const isAdminUser = await isAdmin(ctx.chat.id, userId);
-    if (role !== 'agent' && !isAdminUser) return ctx.reply(t(ctx.chat.id, 'agent_deny'));
-    const token = getOrRefreshToken(ctx.chat.id);
-    const link = `${WEB_APP_URL}/?chatid=${ctx.chat.id}&uid=${userId}&name=${encodeURIComponent('中介-'+ctx.from.first_name)}&token=${token}`;
-    ctx.reply(`${t(ctx.chat.id, 'link_title')}\n\n${t(ctx.chat.id, 'link_copy')}\n${link}`, { disable_web_page_preview: true });
+    if (!GROUP_CHAT_IDS.includes(ctx.chat.id)) return;
+    const userId = ctx.from.id; const role = authorizedUsers.get(`${ctx.chat.id}_${userId}`); const isAdminUser = await isAdmin(ctx.chat.id, userId);
+    if (role !== 'agent' && !isAdminUser) return ctx.reply(t(ctx.chat.id, 'agent_deny'));
+    const token = getOrRefreshToken(ctx.chat.id);
+    const link = `${WEB_APP_URL}/?chatid=${ctx.chat.id}&uid=${userId}&name=${encodeURIComponent('中介-'+ctx.from.first_name)}&token=${token}`;
+    ctx.reply(`${t(ctx.chat.id, 'link_title')}\n\n${t(ctx.chat.id, 'link_copy')}\n${link}`, { disable_web_page_preview: true });
 });
 
 bot.command('boss', async (ctx) => {
@@ -773,52 +841,51 @@ bot.on('text', async (ctx, next) => {
     }
 
     // 群管系統攔截
-    if (GROUP_CHAT_IDS.includes(ctx.chat.id)) {
-        const userId = ctx.from.id; const role = authorizedUsers.get(userId); const isAdminUser = await isAdmin(ctx.chat.id, userId);
-        if (!isAdminUser && role !== 'user' && role !== 'agent') {
-            try { await ctx.deleteMessage(); } catch(e){}
-            const warning = await ctx.reply(t(ctx.chat.id, 'unauth_msg', { name: ctx.from.first_name, username: ctx.from.username ? `@${ctx.from.username}` : '' }));
-            warningMessages.set(warning.message_id, { userId: ctx.from.id, userName: ctx.from.first_name });
-            return;
-        }
+    if (GROUP_CHAT_IDS.includes(ctx.chat.id)) {
+        const userId = ctx.from.id; const role = authorizedUsers.get(`${ctx.chat.id}_${userId}`); const isAdminUser = await isAdmin(ctx.chat.id, userId);
+        if (!isAdminUser && role !== 'user' && role !== 'agent') {
+            try { await ctx.deleteMessage(); } catch(e){}
+            const warning = await ctx.reply(t(ctx.chat.id, 'unauth_msg', { name: ctx.from.first_name, username: ctx.from.username ? `@${ctx.from.username}` : '' }));
+            warningMessages.set(warning.message_id, { userId: ctx.from.id, userName: ctx.from.first_name });
+            return;
+        }
 
-        if (isAdminUser) {
-            if (couponMatch) {
-                const amount = parseFloat(couponMatch[1]);
-                if (!isNaN(amount) && amount > 0) {
-                    const code = 'xaw' + Math.floor(1000 + Math.random() * 9000);
-                    await pool.query(`INSERT INTO coupons (code, amount, expires_at) VALUES ($1, $2, NOW() + INTERVAL '30 minutes')`, [code, amount]);
-                    const replyText = `<code>🎁 优惠劵生成成功\n\n立减金额: ¥ ${amount} CNY\n有效期: 30分钟\n\n点击下方验证码复制给用户：\n${code}\n\n⚠️ 温馨提示：请告诉用户在结算时填写此优惠码即可立减 ¥ ${amount} CNY</code>`;
+        if (isAdminUser) {
+            if (couponMatch) {
+                const amount = parseFloat(couponMatch[1]);
+                if (!isNaN(amount) && amount > 0) {
+                    const code = 'xaw' + Math.floor(1000 + Math.random() * 9000);
+                    await pool.query(`INSERT INTO coupons (code, amount, expires_at) VALUES ($1, $2, NOW() + INTERVAL '30 minutes')`, [code, amount]);
+                    const replyText = `<code>🎁 优惠劵生成成功\n\n立减金额: ¥ ${amount} CNY\n有效期: 30分钟\n\n点击下方验证码复制给用户：\n${code}\n\n⚠️ 温馨提示：请告诉用户在结算时填写此优惠码即可立减 ¥ ${amount} CNY</code>`;
 return ctx.reply(replyText, { parse_mode: 'HTML' });
-                }
-            }
+                }
+            }
 
-            if (ctx.message.reply_to_message) {
-                const replyId = ctx.message.reply_to_message.message_id;
-                let target = warningMessages.get(replyId) || unauthorizedMessages.get(replyId) || { userId: ctx.message.reply_to_message.from.id, userName: ctx.message.reply_to_message.from.first_name };
-                
-                if (text.startsWith('打款 ')) {
-                const amount = text.split(' ')[1]; 
-                if (amount) {
-                    const targetUser = ctx.message.reply_to_message.from;
-                    pendingPayouts.set(targetUser.id, { amount: amount, adminName: ctx.from.first_name, adminId: ctx.from.id, targetUser: targetUser, chatId: ctx.chat.id });
-                    return ctx.reply(`💸 <b>已收到打款通知</b>\n\n金额：<b>${amount}</b>\n操作人：<a href="tg://user?id=${ctx.from.id}">${ctx.from.first_name}</a>\n\n@${targetUser.first_name} 请回复此消息并发送你的 <b>微信</b> 或 <b>支付宝</b> 收款码图片！`, { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: "❌ 取消打款", callback_data: `cancel_pay_${targetUser.id}` }]] } });
-                }
-            } 
-            else if (text === '中介授权') {
-                if (!target) return;
-                const promptMsg = await ctx.reply("请选择你兄弟的出行方式：", { reply_markup: { inline_keyboard: [[{ text: "🛣️ 走小路", callback_data: "agent_land" }], [{ text: "✈️ 坐飞机", callback_data: "agent_flight" }]] } });
-                pendingAgentAuth.set(promptMsg.message_id, target); warningMessages.delete(replyId);
-            } 
-           else if (text === '授权') {
+            if (ctx.message.reply_to_message) {
+                const replyId = ctx.message.reply_to_message.message_id;
+                let target = warningMessages.get(replyId) || unauthorizedMessages.get(replyId) || { userId: ctx.message.reply_to_message.from.id, userName: ctx.message.reply_to_message.from.first_name };
+                
+                if (text.startsWith('打款 ')) {
+                const amount = text.split(' ')[1]; 
+                if (amount) {
+                    const targetUser = ctx.message.reply_to_message.from;
+                    pendingPayouts.set(targetUser.id, { amount: amount, adminName: ctx.from.first_name, adminId: ctx.from.id, targetUser: targetUser, chatId: ctx.chat.id });
+                    return ctx.reply(`💸 <b>已收到打款通知</b>\n\n金额：<b>${amount}</b>\n操作人：<a href="tg://user?id=${ctx.from.id}">${ctx.from.first_name}</a>\n\n@${targetUser.first_name} 请回复此消息并发送你的 <b>微信</b> 或 <b>支付宝</b> 收款码图片！`, { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: "❌ 取消打款", callback_data: `cancel_pay_${targetUser.id}` }]] } });
+                }
+            } 
+            else if (text === '中介授权') {
                 if (!target) return;
-                authorizedUsers.set(target.userId, 'user'); saveAuth();
+                const promptMsg = await ctx.reply("请选择你兄弟的出行方式：", { reply_markup: { inline_keyboard: [[{ text: "🛣️ 走小路", callback_data: "agent_land" }], [{ text: "✈️ 坐飞机", callback_data: "agent_flight" }]] } });
+                pendingAgentAuth.set(promptMsg.message_id, target); warningMessages.delete(replyId);
+            } 
+           else if (text === '授权') {
+                if (!target) return;
+                authorizedUsers.set(`${ctx.chat.id}_${target.userId}`, 'user'); saveAuth();
                 try { await bot.telegram.restrictChatMember(ctx.chat.id, target.userId, { permissions: { can_send_messages: true, can_send_photos: true, can_send_videos: true, can_send_other_messages: true, can_add_web_page_previews: true, can_invite_users: true } }); } catch (e) {}
                 await ctx.reply(t(ctx.chat.id, 'auth_success', { name: target.userName })); warningMessages.delete(replyId);
             }
         }
-    } 
-} 
+    }
 
     await next();
 });
@@ -942,16 +1009,16 @@ bot.on('callback_query', async (ctx) => {
         return ctx.answerCbQuery();
     }
     if (['agent_land', 'agent_flight'].includes(data)) {
-        const target = pendingAgentAuth.get(msg.message_id);
-        if (!target) { try { await ctx.deleteMessage(); } catch(e) {} return ctx.answerCbQuery("操作已过期或找不到目标用户"); }
-        if (!await isAdmin(ctx.chat.id, ctx.from.id) && ctx.from.id !== target.userId) return ctx.answerCbQuery("❌ 无权限！只有管理员或被授权人可以操作");
-        authorizedUsers.set(target.userId, 'agent'); saveAuth();
-        try { await bot.telegram.restrictChatMember(chatId, target.userId, { permissions: { can_send_messages: true, can_send_photos: true, can_send_videos: true, can_send_other_messages: true, can_add_web_page_previews: true, can_invite_users: true } }); } catch (e) {}
-        try { await ctx.deleteMessage(); } catch(e) {}
-        if (data === 'agent_land') await ctx.reply(`✅ 已授权中介\n🛣️ 路上只要是换车的请都使用 /zjkh\n把链接发给你的兄弟，让他拍照\n（温馨提示：链接可以一直使用）`);
-        else await ctx.reply(`✈️ 已授权中介（飞机出行）\n上车前要拍照到此群核对\n请务必在登机前和上车核对时使用  /zjkh\n拍照上传当前位置和图片！\n汇盈国际 - 安全第一`);
-        pendingAgentAuth.delete(msg.message_id); return ctx.answerCbQuery("授权完成");
-    }
+        const target = pendingAgentAuth.get(msg.message_id);
+        if (!target) { try { await ctx.deleteMessage(); } catch(e) {} return ctx.answerCbQuery("操作已过期或找不到目标用户"); }
+        if (!await isAdmin(ctx.chat.id, ctx.from.id) && ctx.from.id !== target.userId) return ctx.answerCbQuery("❌ 无权限！只有管理员或被授权人可以操作");
+        authorizedUsers.set(`${chatId}_${target.userId}`, 'agent'); saveAuth();
+        try { await bot.telegram.restrictChatMember(chatId, target.userId, { permissions: { can_send_messages: true, can_send_photos: true, can_send_videos: true, can_send_other_messages: true, can_add_web_page_previews: true, can_invite_users: true } }); } catch (e) {}
+        try { await ctx.deleteMessage(); } catch(e) {}
+        if (data === 'agent_land') await ctx.reply(`✅ 已授权中介\n🛣️ 路上只要是换车的请都使用 /zjkh\n把链接发给你的兄弟，让他拍照\n（温馨提示：链接可以一直使用）`);
+        else await ctx.reply(`✈️ 已授权中介（飞机出行）\n上车前要拍照到此群核对\n请务必在登机前和上车核对时使用  /zjkh\n拍照上传当前位置和图片！\n汇盈国际 - 安全第一`);
+        pendingAgentAuth.delete(msg.message_id); return ctx.answerCbQuery("授权完成");
+    }
     if (data.startsWith('zl_') || data.startsWith('zj_')) {
         const [type, key] = data.split('_'); const links = type === 'zl' ? ZL_LINKS : ZJ_LINKS; const link = links[key];
         const stored = zlMessages.get(msg.message_id);
@@ -1277,15 +1344,19 @@ orderQty = 1;
             [orderId, userId, prodName, finalVariantName, paymentMethod, finalUSDT.toFixed(2), cnyAmount, orderStatus, JSON.stringify({ ...shippingInfo, contact_method: contactInfo }), wallet, source || 'xaw888.com', orderImageUrl, orderQty, deduct]);
         await client.query('COMMIT');
         if (orderStatus === '已支付') handleReferralBonus(userId, amount, '消费'); 
-        let notifyText = `🆕 <b>新订单提醒</b>\n\n单号: <code>${orderId}</code>\n用户: ${user ? user.contact : userId}\n联系: ${contactInfo}\n商品: ${prodName}${finalVariantName ? ` (${finalVariantName})` : ''}\n需付: ${finalUSDT.toFixed(2)} USDT`;
+        let displayPayMethod = paymentMethod;
+        if (paymentMethod === 'alipay' || paymentMethod === 'Alipay') displayPayMethod = '支付宝';
+        if (paymentMethod === 'wechat' || paymentMethod === 'Wechat' || paymentMethod === 'WeChat') displayPayMethod = '微信';
+
+        let notifyText = `🆕 <b>新订单提醒</b>\n\n单号: <code>${orderId}</code>\n用户: ${user ? user.contact : userId}\nID: ${userId}\n联系: ${contactInfo}\n商品: ${prodName}${finalVariantName ? ` (${finalVariantName})` : ''}\n需付: ${finalUSDT.toFixed(2)} USDT`;
         if (usedCouponAmount > 0) {
             notifyText += `\n🎟️ <b>该用户使用了 ${usedCouponAmount} CNY的优惠劵</b>`;
         }
         if (finalUSDT <= 0) {
             notifyText += `\n✅ <b>余额全额抵扣，请直接发货</b>`;
-        } else if (paymentMethod === '微信' || paymentMethod === '支付宝') {
-            notifyText += `\n⚠️ <b>你有一个收款二维码需要上传请注意，用户的支付方式是：${paymentMethod}</b>`;
-        } else if (paymentMethod === 'USDT' || paymentMethod === 'usdt') {
+        } else if (displayPayMethod === '微信' || displayPayMethod === '支付宝') {
+            notifyText += `\n⚠️ <b>你有一个收款二维码需要上传请注意，用户的支付方式是${displayPayMethod}</b>`;
+        } else if (displayPayMethod === 'USDT' || displayPayMethod === 'usdt') {
             notifyText += `\n💳 <b>该用户是USDT支付，支付成功会自动到账</b>`;
         }
         bot.telegram.sendMessage(TG_ADMIN_GROUP_ID, notifyText, { parse_mode: 'HTML' })
@@ -1538,9 +1609,22 @@ let usdtPollingTimer = null;
 let minTimestamp = Date.now();
 const processedTxIds = new Set();
 
-function startUSDTHTTPPolling() {
+async function startUSDTHTTPPolling() {
     if (usdtPollingTimer) return;
-    minTimestamp = Date.now();
+
+    try {
+        const oldestOrderRes = await pool.query(
+            "SELECT created_at FROM orders WHERE status = '待支付' AND (payment_method = 'USDT' OR payment_method = 'usdt') ORDER BY created_at ASC LIMIT 1"
+        );
+        if (oldestOrderRes.rows.length > 0) {
+            minTimestamp = new Date(oldestOrderRes.rows[0].created_at).getTime() - 60000;
+        } else {
+            minTimestamp = Date.now();
+        }
+    } catch (err) {
+        minTimestamp = Date.now();
+    }
+
     usdtPollingTimer = setInterval(async () => {
         try {
             const pendingRes = await pool.query("SELECT COUNT(*) as count FROM orders WHERE status = '待支付' AND (payment_method = 'USDT' OR payment_method = 'usdt')");
@@ -1551,12 +1635,20 @@ function startUSDTHTTPPolling() {
             }
             const systemWallet = await getSetting('walletAddress');
             if (!systemWallet || systemWallet.length < 10) return;
+            
             const url = `https://api.trongrid.io/v1/accounts/${systemWallet}/transactions/trc20?contract_address=TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t&limit=20&min_timestamp=${minTimestamp}`;
+            const tronApiKey = process.env.TRON_API_KEY || '';
+            const headers = { 'Accept': 'application/json' };
+            if (tronApiKey) {
+                headers['TRON-PRO-API-KEY'] = tronApiKey;
+            }
+
             const response = await fetch(url, {
                 method: 'GET',
-                headers: { 'Accept': 'application/json' }
+                headers: headers
             });
             const data = await response.json();
+            
             if (data && data.success && data.data && data.data.length > 0) {
                 let maxTime = minTimestamp;
                 for (const tx of data.data) {
@@ -1570,11 +1662,16 @@ function startUSDTHTTPPolling() {
                         processedTxIds.delete(iterator.next().value);
                     }
                     if (tx.to !== systemWallet) continue;
+                    
                     const amount = (parseFloat(tx.value) / 1000000).toFixed(2);
-                    const order = (await pool.query("SELECT * FROM orders WHERE status = '待支付' AND usdt_amount = $1 ORDER BY created_at ASC LIMIT 1", [amount])).rows[0];
+                    const orderRes = await pool.query("SELECT * FROM orders WHERE status = '待支付' AND usdt_amount = $1 ORDER BY created_at ASC LIMIT 1", [amount]);
+                    const order = orderRes.rows[0];
+                    
                     if (!order) continue;
+                    
                     const order_id = order.order_id;
                     await pool.query("UPDATE orders SET status = '已支付' WHERE order_id = $1", [order_id]);
+                    
                     if (order.product_name === '余额充值') {
                         await pool.query("UPDATE users SET balance = balance + $1 WHERE id = $2", [parseFloat(amount), order.user_id]);
                     } else {
@@ -1584,9 +1681,11 @@ function startUSDTHTTPPolling() {
                         }
                         await handleReferralBonus(order.user_id, parseFloat(order.usdt_amount), '消费');
                     }
+                    
                     io.to(`user_${order.user_id}`).emit('order_update');
                     const orderData = tgOrderMessages.get(order_id);
-                    const successMsg = `✅ <b>该用户已支付</b>\n🤖 USDT API 自动回调成功\n单号: ${order_id}\n金额: ${amount}`;
+                    const successMsg = `✅ <b>该用户已支付</b>\n USDT 自动回调成功\n单号: ${order_id}\n金额: ${amount}`;
+                    
                     if (orderData) {
                         clearTimeout(orderData.timer);
                         tgOrderMessages.delete(order_id);
@@ -1598,7 +1697,7 @@ function startUSDTHTTPPolling() {
                 minTimestamp = maxTime + 1;
             }
         } catch (e) {}
-    }, 15000);
+    }, 13000);
 }
 app.get('/api/admin/balance_logs', adminAuth, async (req, res) => {
     try { res.json((await pool.query(`SELECT b.*, u.contact FROM balance_logs b LEFT JOIN users u ON b.user_id = u.id ${req.query.userId ? 'WHERE b.user_id = $1' : ''} ORDER BY b.created_at DESC LIMIT 200`, req.query.userId ? [req.query.userId] : [])).rows); } catch(e) { res.status(500).json([]); }
