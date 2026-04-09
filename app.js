@@ -1900,8 +1900,9 @@ app.delete('/api/admin/user/:id', adminAuth, async (req, res) => {
         await pool.query('DELETE FROM users WHERE id = $1', [uid]);
         await pool.query('DELETE FROM orders WHERE user_id = $1', [uid]);
         await pool.query('DELETE FROM withdrawals WHERE user_id = $1', [uid]);
-        await pool.query('DELETE FROM chats WHERE session_id = $1', [`user_${uid}`]);
+        await pool.query('DELETE FROM chats WHERE session_id = $1 OR session_id = $2', [`user_${uid}`, `hr_user_${uid}`]);
         io.to(`user_${uid}`).emit('force_logout');
+        io.to(`hr_user_${uid}`).emit('force_logout');
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ success: false, msg: e.message });
@@ -1911,7 +1912,11 @@ app.delete('/api/admin/user/:id', adminAuth, async (req, res) => {
 app.get('/api/user/balance', async (req, res) => {
     try {
         const resDb = await pool.query('SELECT balance FROM users WHERE id = $1', [req.query.userId]);
-        res.json({ success: resDb.rows.length > 0, balance: resDb.rows.length > 0 ? parseFloat(resDb.rows[0].balance) : 0 });
+        if (resDb.rows.length > 0) {
+            res.json({ success: true, balance: parseFloat(resDb.rows[0].balance) });
+        } else {
+            res.json({ success: false, msg: '用户已被删除', code: 404 });
+        }
     } catch (e) {
         res.json({ success: false });
     }
@@ -2245,28 +2250,35 @@ app.post('/api/withdraw', upload.single('file'), async (req, res) => {
 });
 
 app.post('/api/chat/send', async (req, res) => {
-    try {
-        const result = await pool.query('INSERT INTO chats (session_id, sender, content, msg_type, source) VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at', [req.body.sessionId, 'user', req.body.text, req.body.msgType || 'text', req.body.source || 'xaw888.com']);
-   
-        const sourceDomain = req.body.source || 'xaw888.com';
-        const bossName = sourceDomain.includes('8888') ? '龍哥' : 'Boss';
-        let isHR = req.body.sessionId.startsWith('hr_');
-        let rawSid = req.body.sessionId.replace('hr_', '');
-        let displayId = rawSid.startsWith('user_') ? rawSid.replace('user_', '') : rawSid.slice(-4);
-        let notifyType = isHR ? '招聘通知' : '网站客服通知';
-        
-        if (!mutedSessions.has(req.body.sessionId)) {
-                        sendTgNotify(`💬 <b>${notifyType}</b>\n归属: ${bossName}的客户\n用户: ${displayId}\n内容: ${req.body.msgType === 'image' ? '[发送了一张图片]' : escapeHTML(req.body.text)}`);
-                    }
-                    
-                    const messageData = { id: result.rows[0].id, session_id: req.body.sessionId, sender: 'user', content: req.body.text, msg_type: req.body.msgType || 'text', source: req.body.source || 'xaw888.com', created_at: result.rows[0].created_at };
-                    io.to(req.body.sessionId).emit('new_message', messageData);
-                    io.to('admin_room').emit('new_message', messageData);
-                    res.json({ success: true });
-        } catch (e) {
-            res.json({ success: false });
+    try {
+        if (req.body.userId) {
+            const userCheck = await pool.query('SELECT id FROM users WHERE id = $1', [req.body.userId]);
+            if (userCheck.rows.length === 0) {
+                return res.json({ success: false, msg: '用户已被删除', code: 404 });
+            }
         }
-    });
+
+        const result = await pool.query('INSERT INTO chats (session_id, sender, content, msg_type, source) VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at', [req.body.sessionId, 'user', req.body.text, req.body.msgType || 'text', req.body.source || 'xaw888.com']);
+   
+        const sourceDomain = req.body.source || 'xaw888.com';
+        const bossName = sourceDomain.includes('8888') ? '龍哥' : 'Boss';
+        let isHR = req.body.sessionId.startsWith('hr_');
+        let rawSid = req.body.sessionId.replace('hr_', '');
+        let displayId = rawSid.startsWith('user_') ? rawSid.replace('user_', '') : rawSid.slice(-4);
+        let notifyType = isHR ? '招聘通知' : '网站客服通知';
+        
+        if (!mutedSessions.has(req.body.sessionId)) {
+            sendTgNotify(`💬 <b>${notifyType}</b>\n归属: ${bossName}的客户\n用户: ${displayId}\n内容: ${req.body.msgType === 'image' ? '[发送了一张图片]' : escapeHTML(req.body.text)}`);
+        }
+        
+        const messageData = { id: result.rows[0].id, session_id: req.body.sessionId, sender: 'user', content: req.body.text, msg_type: req.body.msgType || 'text', source: req.body.source || 'xaw888.com', created_at: result.rows[0].created_at };
+        io.to(req.body.sessionId).emit('new_message', messageData);
+        io.to('admin_room').emit('new_message', messageData);
+        res.json({ success: true });
+    } catch (e) {
+        res.json({ success: false });
+    }
+});
 
 app.get('/api/chat/history/:sid', async (req, res) => {
     try {
