@@ -625,7 +625,11 @@ function factoryReset() {
     } catch (e) {}
 }
 
-const bot = new Telegraf(BOT_TOKEN);
+const bot = new Telegraf(BOT_TOKEN, {
+    telegram: {
+        apiRoot: process.env.TG_PROXY_URL || 'https://api.telegram.org'
+    }
+});
 
 bot.catch((err, ctx) => {
     console.error(`🚨 [Bot 全局错误] 触发类型: ${ctx.updateType}`, err);
@@ -2961,18 +2965,19 @@ const startServer = async () => {
         if (domain) {
             const webhookPath = `/telegraf/${bot.secretPathComponent()}`;
             app.use(bot.webhookCallback(webhookPath));         
+            
             bot.telegram.setWebhook(`${domain}${webhookPath}`, {
                 drop_pending_updates: true
             }).then(() => {
-                console.log(`✅ Webhook 已成功绑定到: ${domain}${webhookPath}`);
+                console.log(`✅ Webhook 已成功通过中转站绑定: ${domain}${webhookPath}`);
             }).catch(err => {
-                console.error("⚠️ Webhook 绑定失败，但商城已启动:", err.message);
+                console.error("⚠️ Webhook 绑定失败（中转站可能也在波动），但商城主程序已启动:", err.message);
             });
         } else {
             console.error("⚠️ 警告：未检测到 RENDER_EXTERNAL_URL 环境变量！");
         }
     } catch (error) { 
-        console.error("❌ 核心服务器启动失败:");
+        console.error("❌ 核心服务器初始化失败:");
         console.error(error);
     }
 };
