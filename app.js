@@ -25,6 +25,19 @@ const rateLimit = require('express-rate-limit');
 
 dns.setDefaultResultOrder('ipv4first');
 
+process.on('uncaughtException', async (err) => {
+    console.error('🚨 系统崩溃:', err);
+    try {
+        const time = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+        await bot.telegram.sendMessage(TG_ADMIN_GROUP_ID, `🚨 **服务器崩溃预警**\n\n⏰ 时间：${time}\n❌ 原因：${err.code || '未知'}\n📝 详情：${err.message.substring(0, 100)}\n\n⚠️ 系统即将自动重启。`);
+    } catch (e) {}
+    setTimeout(() => { process.exit(1); }, 2000);
+});
+
+process.on('unhandledRejection', (reason) => {
+    console.error('⚠️ 异步拒绝:', reason);
+});
+
 // ==========================================
 // [1] 基础配置与环境变量
 // ==========================================
@@ -2939,24 +2952,25 @@ const startServer = async () => {
         console.log("⏳ 1. 正在初始化商城数据库...");
         await initDB(); 
         
-        const webhookPath = `/telegraf/${bot.secretPathComponent()}`;
-        const domain = process.env.RENDER_EXTERNAL_URL;
-        
-        if (domain) {
-            console.log("⏳ 2. 正在配置 Telegram Webhook...");
-            app.use(bot.webhookCallback(webhookPath));         
-            await bot.telegram.setWebhook(`${domain}${webhookPath}`, {
-                drop_pending_updates: true
-            });
-            console.log(`✅ Webhook 已成功绑定到: ${domain}${webhookPath}`);
-        } else {
-            console.error("⚠️ 警告：未检测到 RENDER_EXTERNAL_URL 环境变量！请在 Render 后台检查配置。");
-        }
-        
         server.listen(PORT, () => { 
             console.log(`🚀 聚合版 Server 运行于端口 ${PORT}`); 
             startUSDTHTTPPolling();
         });
+
+        const domain = process.env.RENDER_EXTERNAL_URL;
+        if (domain) {
+            const webhookPath = `/telegraf/${bot.secretPathComponent()}`;
+            app.use(bot.webhookCallback(webhookPath));         
+            bot.telegram.setWebhook(`${domain}${webhookPath}`, {
+                drop_pending_updates: true
+            }).then(() => {
+                console.log(`✅ Webhook 已成功绑定到: ${domain}${webhookPath}`);
+            }).catch(err => {
+                console.error("⚠️ Webhook 绑定失败，但商城已启动:", err.message);
+            });
+        } else {
+            console.error("⚠️ 警告：未检测到 RENDER_EXTERNAL_URL 环境变量！");
+        }
     } catch (error) { 
         console.error("❌ 核心服务器启动失败:");
         console.error(error);
