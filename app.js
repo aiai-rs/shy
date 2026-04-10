@@ -2817,7 +2817,8 @@ io.on('connection', (socket) => {
                 }
             }
 
-            if (bot && !user.isMuted && ALLOWED_GROUP_ID) {
+            const isSessionMuted = mutedSessions.has(`user_${userId}`) || mutedSessions.has(`hr_user_${userId}`);
+            if (bot && !user.isMuted && !isSessionMuted && ALLOWED_GROUP_ID) {
                 const conf = await prisma.globalConfig.findUnique({ where: { key: 'notification_switch' } });
                 if (!conf || conf.value === 'on') {
                     try {
