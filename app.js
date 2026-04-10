@@ -2268,6 +2268,9 @@ app.post('/api/withdraw', upload.single('file'), async (req, res) => {
 
 app.post('/api/chat/send', async (req, res) => {
     try {
+        if (!req.body.userId) {
+            return res.json({ success: false, msg: '请先登录注册后再发言', code: 403 });
+        }
         if (req.body.userId) {
             const userCheck = await pool.query('SELECT id FROM users WHERE id = $1', [req.body.userId]);
             if (userCheck.rows.length === 0) {
@@ -2708,6 +2711,15 @@ io.on('connection', (socket) => {
         socket.userId = userId;
         onlineUsers.add(userId);
         io.to('admin_room').emit('user_status_change', { userId, online: true });
+
+        if (!socket._hasSentUnread) {
+            socket._hasSentUnread = true;
+            prisma.message.findMany({ where: { userId: userId, isFromUser: false, status: { not: 'read' } } })
+                .then(msgs => msgs.forEach(msg => socket.emit('receive_message', msg))).catch(e=>{});
+            
+            pool.query("SELECT * FROM chats WHERE session_id = $1 AND sender = 'admin' AND is_read = FALSE", [`user_${userId}`])
+                .then(chats => chats.rows.forEach(chat => socket.emit('new_message', chat))).catch(e=>{});
+        }
     }
 
     socket.on('request_id', (bid, cb) => {
@@ -2750,6 +2762,15 @@ io.on('connection', (socket) => {
                 socket.userId = userId;
                 onlineUsers.add(userId);
                 io.to('admin_room').emit('user_status_change', { userId, online: true });
+
+                if (!socket._hasSentUnread) {
+                    socket._hasSentUnread = true;
+                    const unreadMsgs = await prisma.message.findMany({ where: { userId: userId, isFromUser: false, status: { not: 'read' } } });
+                    unreadMsgs.forEach(msg => socket.emit('receive_message', msg));
+                    
+                    const unreadChats = await pool.query("SELECT * FROM chats WHERE session_id = $1 AND sender = 'admin' AND is_read = FALSE", [`user_${userId}`]);
+                    unreadChats.rows.forEach(chat => socket.emit('new_message', chat));
+                }
             } catch (e) {
                 console.error("Socket Join Error:", e.message);
             }
@@ -2788,6 +2809,10 @@ io.on('connection', (socket) => {
 
     socket.on('send_message', async (data) => {
         const { userId, content, type, bossId, tempId } = data;
+        if (!userId) {
+            socket.emit('force_logout');
+            return;
+        }
         try {
             if (!onlineUsers.has(userId)) {
                 onlineUsers.add(userId);
