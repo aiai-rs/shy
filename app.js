@@ -2387,15 +2387,19 @@ app.post('/api/admin/product/hot', adminAuth, async (req, res) => {
 });
 
 app.post('/api/admin/chat/toggle_mute', adminAuth, (req, res) => {
-        const sid = req.body.sessionId;
-        if (mutedSessions.has(sid)) {
-            mutedSessions.delete(sid);
-            res.json({ success: true, isMuted: false });
-        } else {
-            mutedSessions.add(sid);
-            res.json({ success: true, isMuted: true });
-        }
-    });
+    const sid = req.body.sessionId;
+    if (mutedSessions.has(sid)) {
+        mutedSessions.delete(sid);
+        res.json({ success: true, isMuted: false });
+    } else {
+        mutedSessions.add(sid);
+        if (mutedSessions.size > 1000) {
+            const oldest = mutedSessions.keys().next().value;
+            mutedSessions.delete(oldest);
+        }
+        res.json({ success: true, isMuted: true });
+    }
+});
 
     app.post('/api/admin/chat/clear', adminAuth, async (req, res) => {
     try {
