@@ -45,15 +45,17 @@ const app = express();
 app.set('trust proxy', 1);
 const server = http.createServer(app);
 
-// 允许跨域白名单 (已补充 www 域名)
-// 允许跨域白名单
 const allowedOrigins = [
     'https://xaw888.com',
+    'https://www.xaw888.com',
     'https://xaw8888.com',
+    'https://www.xaw8888.com',
     'https://spht.netlify.app',
     'https://hy88.pro',
     'https://huiying8.netlify.app',
-    'https://hthf.netlify.app'
+    'https://hthf.netlify.app',
+    'http://127.0.0.1:5500', 
+    'http://localhost:5500'  
 ];
 
 const io = new Server(server, {
