@@ -46,11 +46,10 @@ app.set('trust proxy', 1);
 const server = http.createServer(app);
 
 // 允许跨域白名单 (已补充 www 域名)
+// 允许跨域白名单
 const allowedOrigins = [
     'https://xaw888.com',
-    'https://www.xaw888.com',
     'https://xaw8888.com',
-    'https://www.xaw8888.com',
     'https://spht.netlify.app',
     'https://hy88.pro',
     'https://huiying8.netlify.app',
@@ -58,17 +57,7 @@ const allowedOrigins = [
 ];
 
 const io = new Server(server, {
-    // ============================================================
-    // ⚠️ 跨域 (CORS) 配置开关：通过注释 (//) 来切换当前状态
-    // ============================================================
-
-    // 👉 【状态一：本地测试专用】当前开启 (允许所有来源，解决本地打开报错)
-    cors: { origin: true, methods: ["GET", "POST"], credentials: true },
-
-    // 👉 【状态二：线上发布专用】当前关闭 (只允许白名单域名访问，保护安全)
-    // cors: { origin: allowedOrigins, methods: ["GET", "POST"], credentials: true },
-
-    // ============================================================
+    cors: { origin: allowedOrigins, methods: ["GET", "POST"], credentials: true },
     maxHttpBufferSize: 1e8,
     transports: ['websocket'],
     pingTimeout: 10000,
