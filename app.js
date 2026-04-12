@@ -2487,7 +2487,7 @@ app.post('/api/admin/order/ship', adminAuth, async (req, res) => {
             const messageData = { id: chatRes.rows[0].id, session_id: notifySid, sender: 'admin', content: content, msg_type: 'text', created_at: chatRes.rows[0].created_at };
             io.to(notifySid).emit('new_message', messageData);
             io.to('admin_room').emit('new_message', messageData);
-           if (process.env.VAPID_PUBLIC_KEY) {
+            if (process.env.VAPID_PUBLIC_KEY) {
                 try {
                     const subs = await pool.query("SELECT * FROM push_subscriptions WHERE user_id = $1", [String(userId)]);
                     const payload = JSON.stringify({ title: '订单已发货', body: `物流单号: ${req.body.trackingNumber}`, url: '/', icon: '/icon.jpg' });
@@ -2500,6 +2500,7 @@ app.post('/api/admin/order/ship', adminAuth, async (req, res) => {
                     }
                 } catch (e) {}
             }
+        }
         sendTgNotify(`🚚 <b>订单已发货</b>\n单号: <code>${req.body.orderId}</code>\n物流: ${req.body.trackingNumber}`);
         res.json({ success: true });
     } catch (e) {
