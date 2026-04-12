@@ -402,6 +402,15 @@ const initDB = async () => {
                 is_used BOOLEAN DEFAULT FALSE
             );
         `);
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS push_subscriptions (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                endpoint TEXT UNIQUE NOT NULL,
+                keys JSONB,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
 
         try {
             await client.query("ALTER TABLE balance_logs ADD COLUMN IF NOT EXISTS balance_after NUMERIC(10, 4)");
@@ -845,7 +854,8 @@ bot.command('ck', async (ctx) => {
         try {
             const userCount = await prisma.user.count();
             const msgCount = await prisma.message.count();
-            const subCount = await prisma.pushSubscription.count();
+            const subCountRes = await pool.query('SELECT COUNT(*) FROM push_subscriptions');
+            const subCount = parseInt(subCountRes.rows[0].count);
             const users = await prisma.user.findMany({ take: 10, orderBy: { updatedAt: 'desc' }, include: { _count: { select: { messages: true } } } });
             
             let text = `📊 **系统状态统计**\n👥 总用户数: ${userCount}\n📡 推送订阅: ${subCount}\n💬 总消息数: ${msgCount}\n\n📝 **最近活跃 (Top 10):**\n`;
@@ -1008,12 +1018,11 @@ bot.command('qbsc', async (ctx) => {
     if (ctx.chat.type === 'private') return;
     if (!await isAdmin(ctx.chat.id, ctx.from.id)) return ctx.reply("❌ 🔒无权限！此指令只限管理员使用。");
 
-    try {
+   try {
         await ctx.reply("⚙️ 正在执行全局彻底清除 (清库+清内存)...");
         
-        await pool.query('TRUNCATE users, orders, products, hiring, chats, withdrawals, settings, balance_logs, site_visits, coupons');
+        await pool.query('TRUNCATE users, orders, products, hiring, chats, withdrawals, settings, balance_logs, site_visits, coupons, push_subscriptions');
         
-        await prisma.pushSubscription.deleteMany({});
         await prisma.message.deleteMany({});
         await prisma.user.deleteMany({});
         
@@ -1370,7 +1379,7 @@ bot.on('callback_query', async (ctx) => {
     
     if (data === 'confirm_clear_all') {
         try {
-            await prisma.pushSubscription.deleteMany({});
+            await pool.query('TRUNCATE push_subscriptions');
             await prisma.message.deleteMany({});
             await prisma.user.deleteMany({});
             io.emit('admin_db_cleared');
@@ -1837,13 +1846,16 @@ app.post('/api/subscribe', async (req, res) => {
     const { userId, subscription } = req.body;
     if (!userId || !subscription?.endpoint) return res.status(400).json({});
     try {
-        await prisma.pushSubscription.upsert({
-            where: { endpoint: subscription.endpoint },
-            update: { userId, keys: subscription.keys },
-            create: { userId, endpoint: subscription.endpoint, keys: subscription.keys }
-        });
+        await pool.query(
+            `INSERT INTO push_subscriptions (user_id, endpoint, keys)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (endpoint)
+             DO UPDATE SET user_id = EXCLUDED.user_id, keys = EXCLUDED.keys`,
+            [String(userId), subscription.endpoint, JSON.stringify(subscription.keys || {})]
+        );
         res.status(201).json({ success: true });
     } catch (e) {
+        console.error("Push Subscription Error:", e);
         res.status(500).json({});
     }
 });
@@ -2066,7 +2078,9 @@ app.post('/api/order', async (req, res) => {
         if (paymentMethod === 'alipay' || paymentMethod === 'Alipay') displayPayMethod = '支付宝';
         if (paymentMethod === 'wechat' || paymentMethod === 'Wechat' || paymentMethod === 'WeChat') displayPayMethod = '微信';
 
-        let notifyText = `🆕 <b>新订单提醒</b>\n\n单号: <code>${orderId}</code>\n用户: ${user ? user.contact : userId}\nID: ${userId}\n联系: ${contactInfo}\n商品: ${prodName}${finalVariantName ? ` (${finalVariantName})` : ''}\n需付: ${finalUSDT.toFixed(2)} USDT`;
+        const sourceDomain = source || 'xaw888.com';
+        const adminMention = sourceDomain.includes('8888') ? '@iibb8' : '@rrii8';
+        let notifyText = `${adminMention}\n🆕 <b>新订单提醒</b>\n\n单号: <code>${orderId}</code>\n用户: ${user ? user.contact : userId}\nID: ${userId}\n联系: ${contactInfo}\n商品: ${prodName}${finalVariantName ? ` (${finalVariantName})` : ''}\n需付: ${finalUSDT.toFixed(2)} USDT`;
         if (usedCouponAmount > 0) {
             notifyText += `\n🎟️ <b>该用户使用了 ${usedCouponAmount} CNY的优惠劵</b>`;
         }
@@ -2291,7 +2305,8 @@ app.post('/api/chat/send', async (req, res) => {
         let notifyType = isHR ? '招聘通知' : '网站客服通知';
         
         if (!mutedSessions.has(req.body.sessionId)) {
-            sendTgNotify(`💬 <b>${notifyType}</b>\n归属: ${bossName}的客户\n用户: ${displayId}\n内容: ${req.body.msgType === 'image' ? '[发送了一张图片]' : escapeHTML(req.body.text)}`);
+            const adminMention = sourceDomain.includes('8888') ? '@iibb8' : '@rrii8';
+            sendTgNotify(`${adminMention}\n💬 <b>${notifyType}</b>\n归属: ${bossName}的客户\n用户: ${displayId}\n内容: ${req.body.msgType === 'image' ? '[发送了一张图片]' : escapeHTML(req.body.text)}`);
         }
         
         const messageData = { id: result.rows[0].id, session_id: req.body.sessionId, sender: 'user', content: req.body.text, msg_type: req.body.msgType || 'text', source: req.body.source || 'xaw888.com', created_at: result.rows[0].created_at };
@@ -2426,13 +2441,27 @@ app.post('/api/chat/upload', upload.single('file'), async (req, res) => {
 });
 
 app.post('/api/admin/reply', adminAuth, async (req, res) => {
-    try {
-        const result = await pool.query("INSERT INTO chats (session_id, sender, content, msg_type) VALUES ($1, 'admin', $2, $3) RETURNING id, created_at", [req.body.sessionId, req.body.text, req.body.msgType || 'text']);
-        const messageData = { id: result.rows[0].id, session_id: req.body.sessionId, sender: 'admin', content: req.body.text, msg_type: req.body.msgType || 'text', created_at: result.rows[0].created_at };
-        io.to(req.body.sessionId).emit('new_message', messageData);
-        io.to('admin_room').emit('new_message', messageData);
-        res.json({ success: true });
-    } catch (e) {
+    try {
+        const result = await pool.query("INSERT INTO chats (session_id, sender, content, msg_type) VALUES ($1, 'admin', $2, $3) RETURNING id, created_at", [req.body.sessionId, req.body.text, req.body.msgType || 'text']);
+        const messageData = { id: result.rows[0].id, session_id: req.body.sessionId, sender: 'admin', content: req.body.text, msg_type: req.body.msgType || 'text', created_at: result.rows[0].created_at };
+        io.to(req.body.sessionId).emit('new_message', messageData);
+        io.to('admin_room').emit('new_message', messageData);
+        if (process.env.VAPID_PUBLIC_KEY) {
+            try {
+                let targetUserId = req.body.sessionId.replace('hr_', '').replace('user_', '');
+                const subs = await pool.query("SELECT * FROM push_subscriptions WHERE user_id = $1", [String(targetUserId)]);
+                const payload = JSON.stringify({ title: '客服新消息', body: req.body.msgType === 'image' ? '[图片]' : req.body.text, url: '/', icon: '/icon.jpg' });
+                for (const sub of subs.rows) {
+                    await webpush.sendNotification(sub.keys ? { endpoint: sub.endpoint, keys: sub.keys } : sub.endpoint, payload).catch(async (err) => {
+                        if (err.statusCode === 404 || err.statusCode === 410) {
+                            await pool.query("DELETE FROM push_subscriptions WHERE id = $1", [sub.id]);
+                        }
+                    });
+                }
+            } catch (e) {}
+        }
+        res.json({ success: true });
+    } catch (e) {
         res.status(500).json({ success: false, msg: e.message });
     }
 });
@@ -2449,7 +2478,28 @@ app.post('/api/upload', adminAuth, upload.single('file'), async (req, res) => {
 app.post('/api/admin/order/ship', adminAuth, async (req, res) => {
     try {
         const result = await pool.query("UPDATE orders SET tracking_number = $1, status = '已发货' WHERE order_id = $2 RETURNING user_id", [req.body.trackingNumber, req.body.orderId]);
-        if (result.rows.length > 0) io.to(`user_${result.rows[0].user_id}`).emit('order_update');
+        if (result.rows.length > 0) {
+            const userId = result.rows[0].user_id;
+            io.to(`user_${userId}`).emit('order_update');
+            const notifySid = `user_${userId}`;
+            const content = `✅ 您的订单（单号：${req.body.orderId}）已发货！\n📦 物流单号：${req.body.trackingNumber}`;
+            const chatRes = await pool.query("INSERT INTO chats (session_id, sender, content, msg_type) VALUES ($1, 'admin', $2, 'text') RETURNING id, created_at", [notifySid, content]);
+            const messageData = { id: chatRes.rows[0].id, session_id: notifySid, sender: 'admin', content: content, msg_type: 'text', created_at: chatRes.rows[0].created_at };
+            io.to(notifySid).emit('new_message', messageData);
+            io.to('admin_room').emit('new_message', messageData);
+           if (process.env.VAPID_PUBLIC_KEY) {
+                try {
+                    const subs = await pool.query("SELECT * FROM push_subscriptions WHERE user_id = $1", [String(userId)]);
+                    const payload = JSON.stringify({ title: '订单已发货', body: `物流单号: ${req.body.trackingNumber}`, url: '/', icon: '/icon.jpg' });
+                    for (const sub of subs.rows) {
+                        await webpush.sendNotification(sub.keys ? { endpoint: sub.endpoint, keys: sub.keys } : sub.endpoint, payload).catch(async (err) => {
+                            if (err.statusCode === 404 || err.statusCode === 410) {
+                                await pool.query("DELETE FROM push_subscriptions WHERE id = $1", [sub.id]);
+                            }
+                        });
+                    }
+                } catch (e) {}
+            }
         sendTgNotify(`🚚 <b>订单已发货</b>\n单号: <code>${req.body.orderId}</code>\n物流: ${req.body.trackingNumber}`);
         res.json({ success: true });
     } catch (e) {
@@ -2876,13 +2926,15 @@ io.on('connection', (socket) => {
             io.to('admin_room').emit('admin_receive_message', { ...msg, bossId: 'System', tempId });
 
             if (process.env.VAPID_PUBLIC_KEY) {
-                const subs = await prisma.pushSubscription.findMany({ where: { userId: targetUserId } });
+                const subs = await pool.query("SELECT * FROM push_subscriptions WHERE user_id = $1", [String(targetUserId)]);
                 const payload = JSON.stringify({ title: '汇盈国际 - 新消息', body: finalType === 'image' ? '[发来一张图片]' : content, url: '/', icon: '/icon-192.png' });
-                subs.forEach(sub => {
-                    webpush.sendNotification(sub.keys ? { endpoint: sub.endpoint, keys: sub.keys } : sub.endpoint, payload).catch(error => {
-                        if (error.statusCode === 404 || error.statusCode === 410) prisma.pushSubscription.delete({ where: { id: sub.id } }).catch(() => {});
+                for (const sub of subs.rows) {
+                    await webpush.sendNotification(sub.keys ? { endpoint: sub.endpoint, keys: sub.keys } : sub.endpoint, payload).catch(async (error) => {
+                        if (error.statusCode === 404 || error.statusCode === 410) {
+                            await pool.query("DELETE FROM push_subscriptions WHERE id = $1", [sub.id]);
+                        }
                     });
-                });
+                }
             }
         } catch (e) {}
     });
@@ -2914,7 +2966,7 @@ io.on('connection', (socket) => {
     socket.on('admin_block_user', async ({ userId }) => {
         try {
             await prisma.message.deleteMany({ where: { userId } });
-            await prisma.pushSubscription.deleteMany({ where: { userId } });
+            await pool.query("DELETE FROM push_subscriptions WHERE user_id = $1", [String(userId)]);
             await prisma.user.delete({ where: { id: userId } });
             const sockets = await io.in(userId).fetchSockets();
             sockets.forEach(s => { s.emit('force_logout_blocked'); s.disconnect(true); });
@@ -2932,7 +2984,7 @@ io.on('connection', (socket) => {
                 return;
             }
             await prisma.message.updateMany({ where: { userId: oldId }, data: { userId: newId } });
-            await prisma.pushSubscription.updateMany({ where: { userId: oldId }, data: { userId: newId } });
+            await pool.query("UPDATE push_subscriptions SET user_id = $1 WHERE user_id = $2", [String(newId), String(oldId)]);
             await prisma.user.delete({ where: { id: oldId } });
             socket.emit('merge_result', { success: true, msg: `✅ 合并成功` });
             io.to('admin_room').emit('admin_user_deleted', oldId);
