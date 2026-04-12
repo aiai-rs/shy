@@ -2318,6 +2318,16 @@ app.post('/api/chat/send', async (req, res) => {
     }
 });
 
+app.post('/api/chat/read', async (req, res) => {
+    try {
+        await pool.query("UPDATE chats SET is_read = TRUE WHERE session_id = $1 AND sender = 'admin'", [req.body.sessionId]);
+        io.emit('user_chat_read', { sessionId: req.body.sessionId });
+        res.json({ success: true });
+    } catch (e) {
+        res.json({ success: false });
+    }
+});
+
 app.get('/api/chat/history/:sid', async (req, res) => {
     try {
         res.json((await pool.query('SELECT * FROM chats WHERE session_id = $1 ORDER BY created_at ASC', [req.params.sid])).rows);
