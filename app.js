@@ -467,7 +467,9 @@ const forceDisconnectUser = async (targetId) => {
     }
 };
 
-const notifyAdminUpdate = () => { io.emit('admin_update', { timestamp: Date.now() }); };
+const notifyAdminUpdate = (type, payload = {}) => {
+    io.to('admin_room').emit('admin_update', { type, ...payload, timestamp: Date.now() });
+};
 
 const getSetting = async (key) => {
     const res = await pool.query('SELECT value FROM settings WHERE key = $1', [key]);
@@ -1731,6 +1733,46 @@ app.post('/api/user/login', loginLimiter, async (req, res) => {
         res.json({ success: false, msg: e.message });
     }
 });
+app.get('/api/admin/stats', adminAuth, async (req, res) => {
+    try {
+        const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+        const orderStats = await pool.query(`
+            SELECT 
+                COUNT(*) FILTER (WHERE created_at >= $1) as today_orders,
+                COALESCE(SUM(usdt_amount) FILTER (WHERE created_at >= $1), 0) as today_amount,
+                COUNT(*) FILTER (WHERE status = '待支付') as pending_orders,
+                COUNT(*) as total_orders
+            FROM orders
+        `, [todayStart]);
+        const userCount = await pool.query('SELECT COUNT(*) FROM users');
+        const productCount = await pool.query('SELECT COUNT(*) FROM products');
+        const visitStats = await getVisitStats();
+        const rate = await getSetting('rate');
+        const feeRate = await getSetting('feeRate');
+        const announcement = await getSetting('announcement');
+        const popup = await getSetting('popup');
+        const quickReplies = await getSetting('quick_replies') || '您好，请问有什么可以帮您？\n请发送支付截图核实验证。';
+        res.json({
+            success: true,
+            stats: {
+                todayOrders: parseInt(orderStats.rows[0].today_orders),
+                todayAmount: parseFloat(orderStats.rows[0].today_amount),
+                pendingOrders: parseInt(orderStats.rows[0].pending_orders),
+                totalUsers: parseInt(userCount.rows[0].count),
+                totalProducts: parseInt(productCount.rows[0].count)
+            },
+            rate: parseFloat(rate || 0),
+            feeRate: parseFloat(feeRate || 0),
+            announcement: announcement || '',
+            popup: popup,
+            visits: visitStats,
+            quickReplies: quickReplies,
+            mutedSessions: Array.from(mutedSessions)
+        });
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
 
 app.get('/api/public/data', async (req, res) => {
     try {
@@ -2070,9 +2112,10 @@ app.post('/api/order', async (req, res) => {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW() + INTERVAL '30 minutes', $14)`,
             [orderId, userId, prodName, finalVariantName, paymentMethod, finalUSDT.toFixed(2), cnyAmount, orderStatus, JSON.stringify({ ...shippingInfo, contact_method: contactInfo }), wallet, source || 'xaw888.com', orderImageUrl, orderQty, deduct]
         );
+                if (orderStatus === '已支付') {
+            await handleReferralBonus(client, userId, amount, '消费'); // 传入 client 以复用事务
+        }
         await client.query('COMMIT');
-        
-        if (orderStatus === '已支付') handleReferralBonus(userId, amount, '消费'); 
         
         let displayPayMethod = paymentMethod;
         if (paymentMethod === 'alipay' || paymentMethod === 'Alipay') displayPayMethod = '支付宝';
@@ -2248,6 +2291,59 @@ app.post('/api/coupon/verify', async (req, res) => {
         res.json({ success: false, msg: '验证失败' });
     }
 });
+app.get('/api/admin/orders', adminAuth, async (req, res) => {
+    try {
+        const page = parseInt(req.query.page) || 1;
+        const limit = Math.min(parseInt(req.query.limit) || 30, 100);
+        const offset = (page - 1) * limit;
+        const search = req.query.search || '';
+        const status = req.query.status || 'all';
+        let whereClause = '';
+        const params = [];
+        let paramIndex = 1;
+        if (search) {
+            whereClause += ` AND (o.order_id ILIKE $${paramIndex} OR o.product_name ILIKE $${paramIndex} OR u.contact ILIKE $${paramIndex})`;
+            params.push(`%${search}%`);
+            paramIndex++;
+        }
+        if (status !== 'all') {
+            const statusMap = { pending: '待支付', paid: '已支付', cancelled: '已取消' };
+            if (statusMap[status]) {
+                whereClause += ` AND o.status = $${paramIndex}`;
+                params.push(statusMap[status]);
+                paramIndex++;
+            }
+        }
+        const countQuery = `
+            SELECT COUNT(*) as total
+            FROM orders o
+            LEFT JOIN users u ON o.user_id = u.id
+            WHERE 1=1 ${whereClause}
+        `;
+        const dataQuery = `
+            SELECT o.*, u.contact as user_contact, u.id as user_display_id
+            FROM orders o
+            LEFT JOIN users u ON o.user_id = u.id
+            WHERE 1=1 ${whereClause}
+            ORDER BY o.created_at DESC
+            LIMIT $${paramIndex} OFFSET $${paramIndex+1}
+        `;
+        const countRes = await pool.query(countQuery, params);
+        const total = parseInt(countRes.rows[0].total);
+        const totalPages = Math.ceil(total / limit);
+        params.push(limit, offset);
+        const ordersRes = await pool.query(dataQuery, params);
+        res.json({
+            success: true,
+            orders: ordersRes.rows,
+            total,
+            totalPages,
+            currentPage: page
+        });
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
 
 app.post('/api/withdraw', upload.single('file'), async (req, res) => {
     try {
@@ -2364,6 +2460,97 @@ app.get('/api/admin/all', adminAuth, async (req, res) => {
         res.status(500).json({});
     }
 });
+app.get('/api/admin/products', adminAuth, async (req, res) => {
+    try {
+        const page = parseInt(req.query.page) || 1;
+        const limit = Math.min(parseInt(req.query.limit) || 30, 100);
+        const category = req.query.category || '';
+        const offset = (page - 1) * limit;
+
+        let query = 'SELECT * FROM products';
+        let countQuery = 'SELECT COUNT(*) as total FROM products';
+        const params = [];
+        if (category) {
+            query += ' WHERE category = $1';
+            countQuery += ' WHERE category = $1';
+            params.push(category);
+        }
+        query += ' ORDER BY is_pinned DESC, is_hot DESC, hot_time ASC, id DESC LIMIT $' + (params.length + 1) + ' OFFSET $' + (params.length + 2);
+        params.push(limit, offset);
+
+        const [productsRes, countRes, categoriesRes] = await Promise.all([
+            pool.query(query, params),
+            pool.query(countQuery, category ? [category] : []),
+            pool.query('SELECT DISTINCT category FROM products WHERE category IS NOT NULL AND category != \'\'')
+        ]);
+
+        const total = parseInt(countRes.rows[0].total);
+        const totalPages = Math.ceil(total / limit);
+        const categories = categoriesRes.rows.map(r => r.category);
+
+        res.json({
+            success: true,
+            products: productsRes.rows,
+            total,
+            totalPages,
+            currentPage: page,
+            categories
+        });
+    } catch (e) {
+        console.error('Admin products API error:', e);
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+app.get('/api/admin/users_page', adminAuth, async (req, res) => {
+    try {
+        const page = parseInt(req.query.page) || 1;
+        const limit = Math.min(parseInt(req.query.limit) || 30, 100);
+        const offset = (page - 1) * limit;
+        const search = req.query.search || '';
+        const source = req.query.source || 'all';
+        let whereClause = '';
+        const params = [];
+        let paramIndex = 1;
+        if (search) {
+            whereClause += ` AND (u.contact ILIKE $${paramIndex} OR u.id::text ILIKE $${paramIndex})`;
+            params.push(`%${search}%`);
+            paramIndex++;
+        }
+        if (source !== 'all') {
+            if (source === 'boss') {
+                whereClause += ` AND (u.source IS NULL OR u.source NOT LIKE '%8888%')`;
+            } else if (source === 'longge') {
+                whereClause += ` AND u.source LIKE '%8888%'`;
+            }
+        }
+        const countQuery = `SELECT COUNT(*) as total FROM users u WHERE 1=1 ${whereClause}`;
+        const dataQuery = `
+            SELECT u.*, 
+                   (SELECT COUNT(*) > 0 FROM orders WHERE user_id = u.id) as has_order
+            FROM users u
+            WHERE 1=1 ${whereClause}
+            ORDER BY u.created_at DESC
+            LIMIT $${paramIndex} OFFSET $${paramIndex+1}
+        `;
+        const countRes = await pool.query(countQuery, params);
+        const total = parseInt(countRes.rows[0].total);
+        const totalPages = Math.ceil(total / limit);
+        params.push(limit, offset);
+        const usersRes = await pool.query(dataQuery, params);
+        res.json({
+            success: true,
+            users: usersRes.rows,
+            total,
+            totalPages,
+            currentPage: page
+        });
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+
 
 app.post('/api/admin/user/balance', adminAuth, async (req, res) => {
     try {
@@ -2380,6 +2567,75 @@ app.post('/api/admin/user/balance', adminAuth, async (req, res) => {
         res.json({ success: true });
     } catch (e) {
         res.json({ success: false });
+    }
+});
+
+app.get('/api/admin/chat_sessions', adminAuth, async (req, res) => {
+    try {
+        const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+        const offset = parseInt(req.query.offset) || 0;
+        const sourceFilter = req.query.source || 'all';
+        let sourceCondition = '';
+        if (sourceFilter === 'boss') {
+            sourceCondition = " AND (c.source IS NULL OR c.source NOT LIKE '%8888%')";
+        } else if (sourceFilter === 'longge') {
+            sourceCondition = " AND c.source LIKE '%8888%'";
+        }
+        const query = `
+            WITH latest_messages AS (
+                SELECT DISTINCT ON (session_id) session_id, content, msg_type, created_at, sender, is_read, source
+                FROM chats
+                ORDER BY session_id, created_at DESC
+            ),
+            session_stats AS (
+                SELECT 
+                    session_id,
+                    COUNT(*) FILTER (WHERE sender = 'user' AND is_read = FALSE) as unread_count
+                FROM chats
+                GROUP BY session_id
+            )
+            SELECT 
+                lm.session_id,
+                lm.content as last_message_preview,
+                lm.msg_type,
+                lm.created_at as last_message_time,
+                lm.sender as last_sender,
+                lm.source,
+                COALESCE(ss.unread_count, 0) as unread_count
+            FROM latest_messages lm
+            LEFT JOIN session_stats ss ON lm.session_id = ss.session_id
+            WHERE 1=1 ${sourceCondition}
+            ORDER BY lm.created_at DESC
+            LIMIT $1 OFFSET $2
+        `;
+        const countQuery = `
+            SELECT COUNT(DISTINCT session_id) as total
+            FROM chats
+            WHERE 1=1 ${sourceCondition}
+        `;
+        const [sessionsRes, countRes] = await Promise.all([
+            pool.query(query, [limit, offset]),
+            pool.query(countQuery)
+        ]);
+        const total = parseInt(countRes.rows[0].total);
+        const sessions = sessionsRes.rows.map(s => {
+            let displayUid = s.session_id;
+            if (displayUid.startsWith('hr_')) displayUid = displayUid.replace('hr_', '');
+            if (displayUid.startsWith('user_')) displayUid = displayUid.replace('user_', '');
+            return {
+                ...s,
+                display_uid: displayUid,
+                last_message_preview: s.msg_type === 'image' ? '[图片]' : (s.content || '').substring(0, 30)
+            };
+        });
+        res.json({
+            success: true,
+            sessions: sessions,
+            total: total,
+            hasMore: offset + sessions.length < total
+        });
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
     }
 });
 
@@ -2473,6 +2729,32 @@ app.post('/api/admin/reply', adminAuth, async (req, res) => {
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ success: false, msg: e.message });
+    }
+});
+app.get('/api/admin/chat/messages/:sessionId', adminAuth, async (req, res) => {
+    try {
+        const sessionId = req.params.sessionId;
+        const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+        const offset = parseInt(req.query.offset) || 0;
+
+        const countRes = await pool.query('SELECT COUNT(*) as total FROM chats WHERE session_id = $1', [sessionId]);
+        const total = parseInt(countRes.rows[0].total);
+        
+        const messagesRes = await pool.query(
+            'SELECT * FROM chats WHERE session_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3',
+            [sessionId, limit, offset]
+        );
+        const messages = messagesRes.rows.reverse(); // 返回正序
+        
+        res.json({
+            success: true,
+            messages: messages,
+            total: total,
+            hasMore: offset + messages.length < total
+        });
+    } catch (e) {
+        console.error('Chat messages API error:', e);
+        res.status(500).json({ success: false, error: e.message });
     }
 });
 
@@ -2591,6 +2873,15 @@ app.post('/api/admin/product/pin/:id', adminAuth, async (req, res) => {
     }
 });
 
+app.get('/api/admin/hiring', adminAuth, async (req, res) => {
+    try {
+        const hiringRes = await pool.query('SELECT * FROM hiring');
+        res.json({ success: true, hiring: hiringRes.rows });
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
 app.post('/api/admin/update/hiring', adminAuth, async (req, res) => {
     await pool.query('TRUNCATE hiring');
     for (const job of req.body) {
@@ -2633,9 +2924,39 @@ app.post('/api/admin/confirm_pay', adminAuth, async (req, res) => {
 
 app.get('/api/admin/balance_logs', adminAuth, async (req, res) => {
     try {
-        res.json((await pool.query(`SELECT b.*, u.contact FROM balance_logs b LEFT JOIN users u ON b.user_id = u.id ${req.query.userId ? 'WHERE b.user_id = $1' : ''} ORDER BY b.created_at DESC LIMIT 200`, req.query.userId ? [req.query.userId] : [])).rows);
+        const page = parseInt(req.query.page) || 1;
+        const limit = Math.min(parseInt(req.query.limit) || 30, 100);
+        const offset = (page - 1) * limit;
+        const userId = req.query.userId;
+        let whereClause = '';
+        const params = [];
+        if (userId) {
+            whereClause = 'WHERE b.user_id = $1';
+            params.push(userId);
+        }
+        const countQuery = `SELECT COUNT(*) as total FROM balance_logs b ${whereClause}`;
+        const dataQuery = `
+            SELECT b.*, u.contact
+            FROM balance_logs b
+            LEFT JOIN users u ON b.user_id = u.id
+            ${whereClause}
+            ORDER BY b.created_at DESC
+            LIMIT $${params.length+1} OFFSET $${params.length+2}
+        `;
+        const countRes = await pool.query(countQuery, params);
+        const total = parseInt(countRes.rows[0].total);
+        const totalPages = Math.ceil(total / limit);
+        params.push(limit, offset);
+        const logsRes = await pool.query(dataQuery, params);
+        res.json({
+            success: true,
+            logs: logsRes.rows,
+            total,
+            totalPages,
+            currentPage: page
+        });
     } catch (e) {
-        res.status(500).json([]);
+        res.status(500).json({ success: false, error: e.message });
     }
 });
 
