@@ -2633,7 +2633,7 @@ app.get('/api/admin/chat_sessions', adminAuth, async (req, res) => {
             return {
                 ...s,
                 display_uid: displayUid,
-                last_message_preview: s.msg_type === 'image' ? '[图片]' : (s.content || '').substring(0, 30)
+                last_message_preview: s.msg_type === 'image' ? '[图片]' : (s.last_message_preview || '').substring(0, 30)
             };
         });
         res.json({
