@@ -5371,53 +5371,29 @@ app.post('/api/chat/upload', upload.single('file'), async (req, res) => {
 
 
 app.post('/api/admin/reply', adminAuth, async (req, res) => {
-
     try {
-
         const result = await pool.query("INSERT INTO chats (session_id, sender, content, msg_type) VALUES ($1, 'admin', $2, $3) RETURNING id, created_at", [req.body.sessionId, req.body.text, req.body.msgType || 'text']);
-
         const messageData = { id: result.rows[0].id, session_id: req.body.sessionId, sender: 'admin', content: req.body.text, msg_type: req.body.msgType || 'text', created_at: result.rows[0].created_at };
-
         io.to(req.body.sessionId).emit('new_message', messageData);
-
         io.to('admin_room').emit('new_message', messageData);
-
         if (process.env.VAPID_PUBLIC_KEY) {
-
             try {
-
                 let targetUserId = req.body.sessionId.replace('hr_', '').replace('user_', '');
-
                 const subs = await pool.query("SELECT * FROM push_subscriptions WHERE user_id = $1", [String(targetUserId)]);
-
                 const payload = JSON.stringify({ title: '客服新消息', body: req.body.msgType === 'image' ? '[图片]' : req.body.text, url: '/', icon: '/icon.jpg' });
-
                 for (const sub of subs.rows) {
-
                     await webpush.sendNotification(sub.keys ? { endpoint: sub.endpoint, keys: sub.keys } : sub.endpoint, payload).catch(async (err) => {
-
                         if (err.statusCode === 404 || err.statusCode === 410) {
-
                             await pool.query("DELETE FROM push_subscriptions WHERE id = $1", [sub.id]);
-
                         }
-
                     });
-
                 }
-
             } catch (e) {}
-
         }
-
-        res.json({ success: true });
-
+        res.json({ success: true, data: messageData });
     } catch (e) {
-
         res.status(500).json({ success: false, msg: e.message });
-
     }
-
 });
 
 app.get('/api/admin/chat/messages/:sessionId', adminAuth, async (req, res) => {
