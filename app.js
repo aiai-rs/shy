@@ -2575,21 +2575,25 @@ app.get('/api/admin/chat_sessions', adminAuth, async (req, res) => {
         const limit = Math.min(parseInt(req.query.limit) || 20, 100);
         const offset = parseInt(req.query.offset) || 0;
         const sourceFilter = req.query.source || 'all';
-        let sourceCondition = '';
+        let mainSourceCondition = '';
+        let countSourceCondition = '';
         if (sourceFilter === 'boss') {
-            sourceCondition = " AND (c.source IS NULL OR c.source NOT LIKE '%8888%')";
+            mainSourceCondition = " AND (ss.session_source IS NULL OR ss.session_source NOT LIKE '%8888%')";
+            countSourceCondition = " AND (session_source IS NULL OR session_source NOT LIKE '%8888%')";
         } else if (sourceFilter === 'longge') {
-            sourceCondition = " AND c.source LIKE '%8888%'";
+            mainSourceCondition = " AND ss.session_source LIKE '%8888%'";
+            countSourceCondition = " AND session_source LIKE '%8888%'";
         }
         const query = `
             WITH latest_messages AS (
-                SELECT DISTINCT ON (session_id) session_id, content, msg_type, created_at, sender, is_read, source
+                SELECT DISTINCT ON (session_id) session_id, content, msg_type, created_at, sender, is_read
                 FROM chats
-                ORDER BY session_id, created_at DESC
+                ORDER BY session_id, created_at DESC, id DESC
             ),
             session_stats AS (
                 SELECT 
                     session_id,
+                    MAX(source) as session_source,
                     COUNT(*) FILTER (WHERE sender = 'user' AND is_read = FALSE) as unread_count
                 FROM chats
                 GROUP BY session_id
@@ -2600,18 +2604,22 @@ app.get('/api/admin/chat_sessions', adminAuth, async (req, res) => {
                 lm.msg_type,
                 lm.created_at as last_message_time,
                 lm.sender as last_sender,
-                lm.source,
+                ss.session_source as source,
                 COALESCE(ss.unread_count, 0) as unread_count
             FROM latest_messages lm
             LEFT JOIN session_stats ss ON lm.session_id = ss.session_id
-            WHERE 1=1 ${sourceCondition}
-            ORDER BY lm.created_at DESC
+            WHERE 1=1 ${mainSourceCondition}
+            ORDER BY lm.created_at DESC, lm.session_id DESC
             LIMIT $1 OFFSET $2
         `;
         const countQuery = `
-            SELECT COUNT(DISTINCT session_id) as total
-            FROM chats
-            WHERE 1=1 ${sourceCondition}
+            SELECT COUNT(*) as total
+            FROM (
+                SELECT session_id, MAX(source) as session_source
+                FROM chats
+                GROUP BY session_id
+            ) ss
+            WHERE 1=1 ${countSourceCondition}
         `;
         const [sessionsRes, countRes] = await Promise.all([
             pool.query(query, [limit, offset]),
@@ -2741,7 +2749,7 @@ app.get('/api/admin/chat/messages/:sessionId', adminAuth, async (req, res) => {
         const total = parseInt(countRes.rows[0].total);
         
         const messagesRes = await pool.query(
-            'SELECT * FROM chats WHERE session_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3',
+            'SELECT * FROM chats WHERE session_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3',
             [sessionId, limit, offset]
         );
         const messages = messagesRes.rows.reverse(); // 返回正序
