@@ -6728,8 +6728,7 @@ setInterval(async () => {
 
     }
 
-}, 10 * 60 * 1000);
-
+}, 30 * 60 * 1000);
 
 
 cron.schedule('0 0 * * *', async () => {
