@@ -480,37 +480,6 @@ const setSetting = async (key, value) => {
     await pool.query('INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2', [key, value.toString()]);
 };
 
-const broadcastGlobalUpdate = async () => {
-    try {
-        const prods = await pool.query('SELECT * FROM products ORDER BY is_pinned DESC, is_hot DESC, hot_time ASC, id DESC');
-        const hiringRes = await pool.query('SELECT * FROM hiring');
-        const rate = await getSetting('rate');
-        const feeRate = await getSetting('feeRate');
-        const announcement = await getSetting('announcement');
-        const popup = await getSetting('popup');
-        const wallet = await getSetting('walletAddress');
-
-        const distinctCats = [...new Set(prods.rows.map(p => p.category))];
-        const prioritiesRes = await pool.query('SELECT name, priority FROM categories');
-        const pMap = {};
-        prioritiesRes.rows.forEach(r => pMap[r.name] = r.priority);
-        const categories = distinctCats.sort((a, b) => (pMap[b] || 0) - (pMap[a] || 0));
-
-        io.emit('global_update', {
-            products: prods.rows,
-            categories,
-            hiring: hiringRes.rows,
-            showPopup: popup,
-            wallet,
-            rate: parseFloat(rate),
-            feeRate: parseFloat(feeRate),
-            announcement
-        });
-    } catch (e) {
-        console.error("Broadcast Error", e);
-    }
-};
-
 const uploadToCloud = (buffer) => {
     return new Promise((resolve, reject) => {
         const uploadStream = cloudinary.uploader.upload_stream({ folder: "nexus_store_products" }, (error, result) => {
@@ -1204,29 +1173,29 @@ bot.on('text', async (ctx, next) => {
             }
         }
         if (text.startsWith('设置汇率 ')) {
-            const val = parseFloat(text.split(' ')[1]);
-            if (!isNaN(val)) {
-                await setSetting('rate', val);
-                await broadcastGlobalUpdate();
-                return ctx.reply(`✅ 汇率已设为: ${val}`);
-            }
-        }
-        if (text.startsWith('设置手续费 ')) {
-            const val = parseFloat(text.split(' ')[1]);
-            if (!isNaN(val)) {
-                await setSetting('feeRate', val);
-                await broadcastGlobalUpdate();
-                return ctx.reply(`✅ 手续费已设为: ${val}%`);
-            }
-        }
-        if (text.startsWith('设置钱包 ')) {
-            const addr = text.split(' ')[1];
-            if (addr && addr.length > 10) {
-                await setSetting('walletAddress', addr);
-                await broadcastGlobalUpdate();
-                return ctx.reply(`✅ <b>收款地址已更新</b>\n<code>${addr}</code>`, { parse_mode: 'HTML' });
-            }
-        }
+            const val = parseFloat(text.split(' ')[1]);
+            if (!isNaN(val)) {
+                await setSetting('rate', val);
+                io.emit('setting_updated', { key: 'rate', value: val });
+                return ctx.reply(`✅ 汇率已设为: ${val}`);
+            }
+        }
+        if (text.startsWith('设置手续费 ')) {
+            const val = parseFloat(text.split(' ')[1]);
+            if (!isNaN(val)) {
+                await setSetting('feeRate', val);
+                io.emit('setting_updated', { key: 'feeRate', value: val });
+                return ctx.reply(`✅ 手续费已设为: ${val}%`);
+            }
+        }
+        if (text.startsWith('设置钱包 ')) {
+            const addr = text.split(' ')[1];
+            if (addr && addr.length > 10) {
+                await setSetting('walletAddress', addr);
+                io.emit('setting_updated', { key: 'wallet', value: addr });
+                return ctx.reply(`✅ <b>收款地址已更新</b>\n<code>${addr}</code>`, { parse_mode: 'HTML' });
+            }
+        }
         
         if (couponMatch) {
             const amount = parseFloat(couponMatch[1]);
@@ -2149,7 +2118,7 @@ app.post('/api/order', async (req, res) => {
         if (paymentMethod === 'USDT' || paymentMethod === 'usdt') {
             startUSDTHTTPPolling();
         }
-        notifyAdminUpdate();
+        notifyAdminUpdate('order');
         res.json({ success: true, orderId, usdtAmount: finalUSDT.toFixed(2), cnyAmount, wallet, status: orderStatus });
     } catch (e) {
         await client.query('ROLLBACK');
@@ -2177,13 +2146,13 @@ app.post('/api/order/cancel', async (req, res) => {
         
         await client.query("UPDATE orders SET status = '已关闭' WHERE order_id = $1", [req.body.orderId]);
         
-        if (parseFloat(order.balance_deducted) > 0) {
-            await client.query('UPDATE users SET balance = balance + $1 WHERE id = $2', [parseFloat(order.balance_deducted), req.body.userId]);
-            await logBalance(client, req.body.userId, '订单取消', parseFloat(order.balance_deducted), `订单 ${req.body.orderId} 取消退回余额`);
-        }
-        await client.query('COMMIT');
-        notifyAdminUpdate();
-        res.json({ success: true });
+       if (parseFloat(order.balance_deducted) > 0) {
+            await client.query('UPDATE users SET balance = balance + $1 WHERE id = $2', [parseFloat(order.balance_deducted), req.body.userId]);
+            await logBalance(client, req.body.userId, '订单取消', parseFloat(order.balance_deducted), `订单 ${req.body.orderId} 取消退回余额`);
+        }
+        await client.query('COMMIT');
+        notifyAdminUpdate('order');
+        res.json({ success: true });
     } catch (e) {
         await client.query('ROLLBACK');
         res.json({ success: false, msg: e.message });
@@ -2222,10 +2191,10 @@ app.post('/api/recharge', async (req, res) => {
         sendTgNotify(`💰 <b>新充值订单</b>\n单号: <code>${orderId}</code>\n用户: ${user.contact}\n金额: ${usdtAmount} USDT`);
         
         if (req.body.method === 'USDT' || req.body.method === 'usdt') {
-            startUSDTHTTPPolling();
-        }
-        notifyAdminUpdate();
-        res.json({ success: true, orderId, usdtAmount: usdtAmount.toFixed(2), cnyAmount, wallet });
+            startUSDTHTTPPolling();
+        }
+        notifyAdminUpdate('funds');
+        res.json({ success: true, orderId, usdtAmount: usdtAmount.toFixed(2), cnyAmount, wallet });
     } catch (e) {
         res.json({ success: false, msg: e.message });
     }
@@ -2266,12 +2235,12 @@ app.post('/api/order/confirm-payment', upload.single('file'), async (req, res) =
                         { text: "❌ 未收到", callback_data: `pay_reject_${req.body.orderId}_${req.body.userId}` }
                     ]]
                 }
-            });
-        } catch (e) { console.error("发送支付凭证至TG失败:", e.message); }
-        
-        await pool.query("UPDATE orders SET proof = 'TG_SENT', status = '待审核' WHERE order_id = $1", [req.body.orderId]);
-        notifyAdminUpdate();
-        res.json({ success: true });
+            });
+        } catch (e) { console.error("发送支付凭证至TG失败:", e.message); }
+        
+        await pool.query("UPDATE orders SET proof = 'TG_SENT', status = '待审核' WHERE order_id = $1", [req.body.orderId]);
+        notifyAdminUpdate('order');
+        res.json({ success: true });
     } catch (e) {
         res.json({ success: false, msg: "网络繁忙，请联系客服核实" });
     }
@@ -2372,7 +2341,7 @@ app.post('/api/withdraw', upload.single('file'), async (req, res) => {
         if (req.file) await bot.telegram.sendPhoto(TG_ADMIN_GROUP_ID, { source: req.file.buffer }, options);
         else await bot.telegram.sendMessage(TG_ADMIN_GROUP_ID, options.caption, options);
         
-        notifyAdminUpdate();
+        notifyAdminUpdate('funds');
         res.json({ success: true });
     } catch (e) {
         res.json({ success: false, msg: 'Error' });
@@ -2667,18 +2636,19 @@ app.post('/api/admin/chat/read', adminAuth, async (req, res) => {
 });
 
 app.post('/api/admin/product/hot', adminAuth, async (req, res) => {
-    try {
-        if (!Array.isArray(req.body.ids)) return res.json({ success: false });
-        if (req.body.isHot) {
-            await pool.query('UPDATE products SET is_hot = TRUE, hot_time = COALESCE(hot_time, NOW()) WHERE id = ANY($1)', [req.body.ids]);
-        } else {
-            await pool.query('UPDATE products SET is_hot = FALSE, hot_time = NULL WHERE id = ANY($1)', [req.body.ids]);
-        }
-        await broadcastGlobalUpdate();
-        res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ success: false });
-    }
+    try {
+        if (!Array.isArray(req.body.ids)) return res.json({ success: false });
+        const ids = req.body.ids.map(id => Number(id));
+        if (req.body.isHot) {
+            await pool.query('UPDATE products SET is_hot = TRUE, hot_time = COALESCE(hot_time, NOW()) WHERE id = ANY($1)', [ids]);
+        } else {
+            await pool.query('UPDATE products SET is_hot = FALSE, hot_time = NULL WHERE id = ANY($1)', [ids]);
+        }
+        io.emit('products_hot_changed', { ids: ids, is_hot: req.body.isHot });
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ success: false });
+    }
 });
 
 app.post('/api/admin/chat/toggle_mute', adminAuth, (req, res) => {
@@ -2812,10 +2782,10 @@ app.post('/api/admin/order/upload_qrcode', adminAuth, upload.single('qrcode'), a
     if (req.file) {
         try {
             const result = await pool.query("UPDATE orders SET qrcode_url = $1, expires_at = NOW() + INTERVAL '30 minutes' WHERE order_id = $2 RETURNING user_id", [await uploadToCloud(req.file.buffer), req.body.orderId]);
-            sendTgNotify(`✅ <b>收款码已上传</b>\n单号: <code>${req.body.orderId}</code>`);
-            if (result.rows[0]?.user_id) io.to(`user_${result.rows[0].user_id}`).emit('order_update');
-            notifyAdminUpdate();
-            res.json({ success: true });
+            sendTgNotify(`✅ <b>收款码已上传</b>\n单号: <code>${req.body.orderId}</code>`);
+            if (result.rows[0]?.user_id) io.to(`user_${result.rows[0].user_id}`).emit('order_update');
+            notifyAdminUpdate('order');
+            res.json({ success: true });
         } catch (e) {
             res.json({ success: false, msg: 'Upload failed' });
         }
@@ -2825,8 +2795,15 @@ app.post('/api/admin/order/upload_qrcode', adminAuth, upload.single('qrcode'), a
 });
 
 app.post('/api/admin/update/announcement', adminAuth, async (req, res) => {
-    await setSetting('announcement', req.body.text);
-    await broadcastGlobalUpdate();
+    await setSetting('announcement', req.body.text);
+    io.emit('setting_updated', { key: 'announcement', value: req.body.text });
+    res.json({ success: true });
+});
+
+app.post('/api/admin/update/popup', adminAuth, async (req, res) => {
+    await setSetting('popup', req.body.open);
+    // 这里将 key 改为和数据库一致的 popup，或者让前端兼容这两个名字
+    io.emit('setting_updated', { key: 'popup', value: req.body.open });
     res.json({ success: true });
 });
 
@@ -2847,38 +2824,70 @@ app.post('/api/admin/chat/recall', adminAuth, async (req, res) => {
 });
 
 app.post('/api/admin/product', adminAuth, upload.single('file'), async (req, res) => {
-    try {
-        await pool.query('INSERT INTO products (id, name, price, category, type, description, image_url, variants) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)', [Date.now(), req.body.name, req.body.price, req.body.category, req.body.type, req.body.desc, req.file ? await uploadToCloud(req.file.buffer) : req.body.imageUrl || '', req.body.variants || '[]']);
-        await broadcastGlobalUpdate();
-        res.json({ success: true });
-    } catch (e) {
-        res.json({ success: false, msg: e.message });
-    }
+    try {
+        const id = Date.now();
+        const imageUrl = req.file ? await uploadToCloud(req.file.buffer) : req.body.imageUrl || '';
+        const variants = req.body.variants || '[]';
+        await pool.query('INSERT INTO products (id, name, price, category, type, description, image_url, variants) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)', [id, req.body.name, req.body.price, req.body.category, req.body.type, req.body.desc, imageUrl, variants]);
+        io.emit('product_added', {
+            id: id,
+            name: req.body.name,
+            price: req.body.price,
+            category: req.body.category,
+            type: req.body.type,
+            description: req.body.desc,
+            image_url: imageUrl,
+            variants: variants,
+            is_pinned: false,
+            is_hot: false,
+            hot_time: null // 必须显式传递，否则前端排序函数 compare(a, b) 读取 a.hot_time 时会崩溃
+        });
+        res.json({ success: true });
+    } catch (e) {
+        res.json({ success: false, msg: e.message });
+    }
 });
 
 app.put('/api/admin/product/:id', adminAuth, async (req, res) => {
+    // 先查出原有的热销状态，防止覆盖丢失
+    const oldProd = await pool.query('SELECT is_hot, is_pinned, hot_time FROM products WHERE id = $1', [req.params.id]);
+    const { is_hot, is_pinned, hot_time } = oldProd.rows[0] || {};
+
     await pool.query('UPDATE products SET name=$1, price=$2, category=$3, type=$4, description=$5, image_url=$6, variants=$7 WHERE id=$8', [req.body.name, req.body.price, req.body.category, req.body.type, req.body.desc, req.body.imageUrl, req.body.variants || '[]', req.params.id]);
-    await broadcastGlobalUpdate();
+    
+    io.emit('product_updated', {
+        id: Number(req.params.id),
+        name: req.body.name,
+        price: req.body.price,
+        category: req.body.category,
+        type: req.body.type,
+        description: req.body.desc,
+        image_url: req.body.imageUrl,
+        variants: req.body.variants || '[]',
+        is_hot: is_hot,
+        is_pinned: is_pinned,
+        hot_time: hot_time
+    });
     res.json({ success: true });
 });
 
 app.delete('/api/admin/product/:id', adminAuth, async (req, res) => {
-    await pool.query('DELETE FROM products WHERE id = $1', [req.params.id]);
-    await broadcastGlobalUpdate();
-    res.json({ success: true });
+    await pool.query('DELETE FROM products WHERE id = $1', [req.params.id]);
+    io.emit('product_deleted', Number(req.params.id));
+    res.json({ success: true });
 });
 
 app.post('/api/admin/product/pin/:id', adminAuth, async (req, res) => {
-    try {
-        const productRes = await pool.query('SELECT is_pinned FROM products WHERE id = $1', [req.params.id]);
-        if (productRes.rows.length === 0) return res.json({ success: false, msg: '商品不存在' });
-        await pool.query('UPDATE products SET is_pinned = $1 WHERE id = $2', [!productRes.rows[0].is_pinned, req.params.id]);
-        await broadcastGlobalUpdate();
-        notifyAdminUpdate();
-        res.json({ success: true, is_pinned: !productRes.rows[0].is_pinned });
-    } catch (e) {
-        res.status(500).json({ success: false, msg: e.message });
-    }
+    try {
+        const productRes = await pool.query('SELECT is_pinned FROM products WHERE id = $1', [req.params.id]);
+        if (productRes.rows.length === 0) return res.json({ success: false, msg: '商品不存在' });
+        await pool.query('UPDATE products SET is_pinned = $1 WHERE id = $2', [!productRes.rows[0].is_pinned, req.params.id]);
+        io.emit('product_patched', { id: Number(req.params.id), is_pinned: !productRes.rows[0].is_pinned });
+        notifyAdminUpdate();
+        res.json({ success: true, is_pinned: !productRes.rows[0].is_pinned });
+    } catch (e) {
+        res.status(500).json({ success: false, msg: e.message });
+    }
 });
 
 app.get('/api/admin/hiring', adminAuth, async (req, res) => {
@@ -2891,14 +2900,13 @@ app.get('/api/admin/hiring', adminAuth, async (req, res) => {
 });
 
 app.post('/api/admin/update/hiring', adminAuth, async (req, res) => {
-    await pool.query('TRUNCATE hiring');
-    for (const job of req.body) {
-        await pool.query('INSERT INTO hiring (title, content, contact) VALUES ($1, $2, $3)', [job.title, job.content, job.contact]);
-    }
-    await broadcastGlobalUpdate();
-    res.json({ success: true });
+    await pool.query('TRUNCATE hiring');
+    for (const job of req.body) {
+        await pool.query('INSERT INTO hiring (title, content, contact) VALUES ($1, $2, $3)', [job.title, job.content, job.contact]);
+    }
+    io.emit('hiring_updated', req.body);
+    res.json({ success: true });
 });
-
 app.post('/api/admin/confirm_pay', adminAuth, async (req, res) => {
     const client = await pool.connect(); 
     try {
@@ -2913,10 +2921,12 @@ app.post('/api/admin/confirm_pay', adminAuth, async (req, res) => {
                 await client.query("INSERT INTO balance_logs (user_id, type, amount, remark, balance_after) VALUES ($1, $2, $3, $4, $5)", [order.user_id, '余额充值', parseFloat(order.usdt_amount), `订单 ${req.body.orderId} 充值到账`, (await client.query("SELECT balance FROM users WHERE id = $1", [order.user_id])).rows[0]?.balance || 0]);
             } else {
                 try { await handleReferralBonus(order.user_id, parseFloat(order.usdt_amount), '消费'); } catch (bonusErr) {}
-            }
-            await client.query('COMMIT');
-            io.to(`user_${order.user_id}`).emit('order_update');
-            notifyAdminUpdate();
+            }
+           await client.query('COMMIT');
+            const updatedOrderRes = await pool.query("SELECT * FROM orders WHERE order_id = $1", [req.body.orderId]);
+            const updatedBalanceRes = await pool.query("SELECT balance FROM users WHERE id = $1", [order.user_id]);
+            io.to(`user_${order.user_id}`).emit('order_update', { order: updatedOrderRes.rows[0], balance: updatedBalanceRes.rows[0].balance });
+            notifyAdminUpdate('order');
             res.json({ success: true });
         } else {
             await client.query('ROLLBACK');
@@ -3068,7 +3078,12 @@ async function startUSDTHTTPPolling() {
                         await handleReferralBonus(order.user_id, parseFloat(order.usdt_amount), '消费');
                     }
                     
-                    io.to(`user_${order.user_id}`).emit('order_update');
+                    const updatedOrderRes = await pool.query("SELECT * FROM orders WHERE order_id = $1", [order_id]);
+                    const updatedBalanceRes = await pool.query("SELECT balance FROM users WHERE id = $1", [order.user_id]);
+                    io.to(`user_${order.user_id}`).emit('order_update', { 
+                        order: updatedOrderRes.rows[0], 
+                        balance: updatedBalanceRes.rows[0].balance 
+                    });
                     const orderData = tgOrderMessages.get(order_id);
                     const successMsg = `✅ <b>该用户已支付</b>\n USDT 自动回调成功\n单号: ${order_id}\n金额: ${amount}`;
                     
@@ -3085,7 +3100,7 @@ async function startUSDTHTTPPolling() {
         } catch (e) {
             console.error("USDT Polling Error:", e.message);
         }
-    }, 13000);
+    }, 30000);
 }
 
 // ==========================================
@@ -3340,27 +3355,26 @@ io.on('connection', (socket) => {
 // ==========================================
 
 setInterval(async () => {
-    const client = await pool.connect();
-    try {
-        const timeoutOrders = await client.query(`SELECT order_id, product_name, balance_deducted, user_id FROM orders WHERE status = '待支付' AND qrcode_url IS NULL AND created_at < NOW() - INTERVAL '30 minutes'`);
-        if (timeoutOrders.rowCount > 0) {
-            await client.query('BEGIN');
-            for (const order of timeoutOrders.rows) {
-                await client.query("UPDATE orders SET status = '已关闭' WHERE order_id = $1", [order.order_id]);
-                if (parseFloat(order.balance_deducted) > 0) {
-                    await client.query('UPDATE users SET balance = balance + $1 WHERE id = $2', [parseFloat(order.balance_deducted), order.user_id]);
-                    await logBalance(client, order.user_id, '订单超时', parseFloat(order.balance_deducted), `订单 ${order.order_id} 超时关闭退回余额`);
-                }
-            }
-            await client.query('COMMIT');
-            broadcastGlobalUpdate();
-            notifyAdminUpdate();
-        }
-    } catch (e) {
-        await client.query('ROLLBACK');
-    } finally {
-        client.release();
-    }
+    const client = await pool.connect();
+    try {
+        const timeoutOrders = await client.query(`SELECT order_id, product_name, balance_deducted, user_id FROM orders WHERE status = '待支付' AND qrcode_url IS NULL AND created_at < NOW() - INTERVAL '30 minutes'`);
+        if (timeoutOrders.rowCount > 0) {
+            await client.query('BEGIN');
+            for (const order of timeoutOrders.rows) {
+                await client.query("UPDATE orders SET status = '已关闭' WHERE order_id = $1", [order.order_id]);
+                if (parseFloat(order.balance_deducted) > 0) {
+                    await client.query('UPDATE users SET balance = balance + $1 WHERE id = $2', [parseFloat(order.balance_deducted), order.user_id]);
+                    await logBalance(client, order.user_id, '订单超时', parseFloat(order.balance_deducted), `订单 ${order.order_id} 超时关闭退回余额`);
+                }
+            }
+            await client.query('COMMIT');
+            notifyAdminUpdate('order');
+        }
+    } catch (e) {
+        await client.query('ROLLBACK');
+    } finally {
+        client.release();
+    }
 }, 10 * 60 * 1000);
 
 cron.schedule('0 0 * * *', async () => {
