@@ -1050,17 +1050,13 @@ async function handleReferralBonus(userId, amount, type) {
 
                     content: content,
 
-                    msg_type: 'text',
-
-                    created_at: msgRes.rows[0].created_at
-
-                });
-
-                io.to(notifySid).emit('order_update');
-
-            }
-
-        }
+                   msg_type: 'text',
+                    created_at: msgRes.rows[0].created_at
+                });
+                const bonusBalanceRes = await client.query("SELECT balance FROM users WHERE id = $1", [inviterId]);
+                io.to(notifySid).emit('order_update', { balance: bonusBalanceRes.rows[0].balance });
+            }
+        }
 
         await client.query('COMMIT');
 
@@ -2771,70 +2767,40 @@ bot.on('callback_query', async (ctx) => {
 
 
     if (data.startsWith('wd_confirm_')) {
-
-        const parts = data.split('_');
-
-        const wdId = parts[2];
-
-        const userId = parts[3];
-
-        
-
-        await pool.query("UPDATE withdrawals SET status = '已完成' WHERE id = $1", [wdId]);
-
-        const notifySid = `user_${userId}`;
-
-        const content = '✅ 您的提现已处理，请查收。';
-
-        const resDb = await pool.query("INSERT INTO chats (session_id, sender, content, msg_type) VALUES ($1, 'admin', $2, 'text') RETURNING created_at", [notifySid, content]);
-
-        
-
-        io.to(notifySid).emit('new_message', { session_id: notifySid, sender: 'admin', content: content, msg_type: 'text', created_at: resDb.rows[0].created_at });
-
-        io.to(notifySid).emit('order_update');
-
-        return ctx.editMessageCaption(msg.caption ? msg.caption + "\n\n✅ <b>已打款</b>" : msg.text + "\n\n✅ <b>已打款</b>", { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } });
-
-    }
-
-    
-
-    if (data.startsWith('wd_reject_')) {
-
-        const parts = data.split('_');
-
-        const wdId = parts[2];
-
-        const userId = parts[3];
-
-        const amount = parseFloat(parts[4]);
-
-        
-
-        await pool.query("UPDATE withdrawals SET status = '已驳回' WHERE id = $1", [wdId]);
-
-        await pool.query("UPDATE users SET balance = balance + $1 WHERE id = $2", [amount, userId]);
-
-        await logBalance(pool, userId, '提现退回', amount, `提现申请(ID:${wdId})被驳回`);
-
-        
-
-        const notifySid = `user_${userId}`;
-
-        const content = '❌ 您的提现已被驳回，资金已退回余额。';
-
-        const resDb = await pool.query("INSERT INTO chats (session_id, sender, content, msg_type) VALUES ($1, 'admin', $2, 'text') RETURNING created_at", [notifySid, content]);
-
-        
-
-        io.to(notifySid).emit('new_message', { session_id: notifySid, sender: 'admin', content: content, msg_type: 'text', created_at: resDb.rows[0].created_at });
-
-        io.to(notifySid).emit('order_update');
-
-        return ctx.editMessageCaption(msg.caption ? msg.caption + "\n\n❌ <b>已驳回</b>" : msg.text + "\n\n❌ <b>已驳回</b>", { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } });
-
-    }
+        const parts = data.split('_');
+        const wdId = parts[2];
+        const userId = parts[3];
+        
+        await pool.query("UPDATE withdrawals SET status = '已完成' WHERE id = $1", [wdId]);
+        const notifySid = `user_${userId}`;
+        const content = '✅ 您的提现已处理，请查收。';
+        const resDb = await pool.query("INSERT INTO chats (session_id, sender, content, msg_type) VALUES ($1, 'admin', $2, 'text') RETURNING created_at", [notifySid, content]);
+        
+        io.to(notifySid).emit('new_message', { session_id: notifySid, sender: 'admin', content: content, msg_type: 'text', created_at: resDb.rows[0].created_at });
+        const updatedBalanceResConfirm = await pool.query("SELECT balance FROM users WHERE id = $1", [userId]);
+        io.to(notifySid).emit('order_update', { balance: updatedBalanceResConfirm.rows[0].balance });
+        return ctx.editMessageCaption(msg.caption ? msg.caption + "\n\n✅ <b>已打款</b>" : msg.text + "\n\n✅ <b>已打款</b>", { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } });
+    }
+    
+    if (data.startsWith('wd_reject_')) {
+        const parts = data.split('_');
+        const wdId = parts[2];
+        const userId = parts[3];
+        const amount = parseFloat(parts[4]);
+        
+        await pool.query("UPDATE withdrawals SET status = '已驳回' WHERE id = $1", [wdId]);
+        await pool.query("UPDATE users SET balance = balance + $1 WHERE id = $2", [amount, userId]);
+        await logBalance(pool, userId, '提现退回', amount, `提现申请(ID:${wdId})被驳回`);
+        
+        const notifySid = `user_${userId}`;
+        const content = '❌ 您的提现已被驳回，资金已退回余额。';
+        const resDb = await pool.query("INSERT INTO chats (session_id, sender, content, msg_type) VALUES ($1, 'admin', $2, 'text') RETURNING created_at", [notifySid, content]);
+        
+        io.to(notifySid).emit('new_message', { session_id: notifySid, sender: 'admin', content: content, msg_type: 'text', created_at: resDb.rows[0].created_at });
+        const updatedBalanceResReject = await pool.query("SELECT balance FROM users WHERE id = $1", [userId]);
+        io.to(notifySid).emit('order_update', { balance: updatedBalanceResReject.rows[0].balance });
+        return ctx.editMessageCaption(msg.caption ? msg.caption + "\n\n❌ <b>已驳回</b>" : msg.text + "\n\n❌ <b>已驳回</b>", { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } });
+    }
 
     
 
@@ -2870,53 +2836,33 @@ bot.on('callback_query', async (ctx) => {
 
             
 
-            const notifySid = `user_${userId}`;
-
-            const content = '✅ 您的支付已确认，订单正在处理中。';
-
-            const resDb = await pool.query("INSERT INTO chats (session_id, sender, content, msg_type) VALUES ($1, 'admin', $2, 'text') RETURNING created_at", [notifySid, content]);
-
-            
-
-            io.to(notifySid).emit('new_message', { session_id: notifySid, sender: 'admin', content: content, msg_type: 'text', created_at: resDb.rows[0].created_at });
-
-            io.to(notifySid).emit('order_update');
-
-            return ctx.editMessageCaption(msg.caption ? msg.caption + "\n\n✅ <b>已确认收款</b>" : "✅ <b>已确认收款</b>", { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } });
-
-        }
-
-    }
-
-    
-
-    if (data.startsWith('pay_reject_')) {
-
-        const parts = data.split('_');
-
-        const orderId = parts[2];
-
-        const userId = parts[3];
-
-        
-
-        await pool.query("UPDATE orders SET status = '待支付', proof = NULL WHERE order_id = $1", [orderId]);
-
-        const notifySid = `user_${userId}`;
-
-        const rejectMsg = `❌ 订单 ${orderId} 支付核实失败。\n原因：客服反应这笔款项未收到,请稍等客服稍后会于你联系。\n订单状态已重置，请核对后重新上传凭证。`;
-
-        const resDb = await pool.query("INSERT INTO chats (session_id, sender, content, msg_type) VALUES ($1, 'admin', $2, 'text') RETURNING created_at", [notifySid, rejectMsg]);
-
-        
-
-        io.to(notifySid).emit('new_message', { session_id: notifySid, sender: 'admin', content: rejectMsg, msg_type: 'text', created_at: resDb.rows[0].created_at });
-
-        io.to(notifySid).emit('order_update');
-
-        return ctx.editMessageCaption(msg.caption ? msg.caption + "\n\n❌ <b>已驳回 (重置为待支付)</b>" : "❌ <b>已驳回</b>", { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } });
-
-    }
+const notifySid = `user_${userId}`;
+            const content = '✅ 您的支付已确认，订单正在处理中。';
+            const resDb = await pool.query("INSERT INTO chats (session_id, sender, content, msg_type) VALUES ($1, 'admin', $2, 'text') RETURNING created_at", [notifySid, content]);
+            
+            io.to(notifySid).emit('new_message', { session_id: notifySid, sender: 'admin', content: content, msg_type: 'text', created_at: resDb.rows[0].created_at });
+            const updatedOrderRes = await pool.query("SELECT * FROM orders WHERE order_id = $1", [orderId]);
+            const updatedBalanceRes = await pool.query("SELECT balance FROM users WHERE id = $1", [userId]);
+            io.to(notifySid).emit('order_update', { order: updatedOrderRes.rows[0], balance: updatedBalanceRes.rows[0].balance });
+            return ctx.editMessageCaption(msg.caption ? msg.caption + "\n\n✅ <b>已确认收款</b>" : "✅ <b>已确认收款</b>", { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } });
+        }
+    }
+    
+    if (data.startsWith('pay_reject_')) {
+        const parts = data.split('_');
+        const orderId = parts[2];
+        const userId = parts[3];
+        
+        await pool.query("UPDATE orders SET status = '待支付', proof = NULL WHERE order_id = $1", [orderId]);
+        const notifySid = `user_${userId}`;
+        const rejectMsg = `❌ 订单 ${orderId} 支付核实失败。\n原因：客服反应这笔款项未收到,请稍等客服稍后会于你联系。\n订单状态已重置，请核对后重新上传凭证。`;
+        const resDb = await pool.query("INSERT INTO chats (session_id, sender, content, msg_type) VALUES ($1, 'admin', $2, 'text') RETURNING created_at", [notifySid, rejectMsg]);
+        
+        io.to(notifySid).emit('new_message', { session_id: notifySid, sender: 'admin', content: rejectMsg, msg_type: 'text', created_at: resDb.rows[0].created_at });
+        const updatedOrderResReject = await pool.query("SELECT * FROM orders WHERE order_id = $1", [orderId]);
+        io.to(notifySid).emit('order_update', { order: updatedOrderResReject.rows[0] });
+        return ctx.editMessageCaption(msg.caption ? msg.caption + "\n\n❌ <b>已驳回 (重置为待支付)</b>" : "❌ <b>已驳回</b>", { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } });
+    }
 
 
 
@@ -4260,15 +4206,23 @@ app.post('/api/order', async (req, res) => {
 
 app.get('/api/order', async (req, res) => {
 
-    try {
+    try {
 
-        res.json((await pool.query(`SELECT * FROM orders WHERE user_id = $1 ORDER BY created_at DESC`, [req.query.userId])).rows);
+        if (req.query.status === 'pending_qr') {
 
-    } catch (e) {
+            res.json((await pool.query(`SELECT * FROM orders WHERE user_id = $1 AND status = '待支付' AND qrcode_url IS NOT NULL ORDER BY created_at DESC`, [req.query.userId])).rows);
 
-        res.json([]);
+        } else {
 
-    }
+            res.json((await pool.query(`SELECT * FROM orders WHERE user_id = $1 ORDER BY created_at DESC`, [req.query.userId])).rows);
+
+        }
+
+    } catch (e) {
+
+        res.json([]);
+
+    }
 
 });
 
@@ -5061,14 +5015,11 @@ app.post('/api/admin/user/balance', adminAuth, async (req, res) => {
         
 
         await pool.query(sql, [val, req.body.userId]);
-
-        await logBalance(pool, req.body.userId, '客服后台充值', req.body.type === 'add' ? val : (req.body.type === 'subtract' ? -val : 0), req.body.type === 'set' ? `客服重置余额为 ${val}` : `客服后台操作 ${req.body.type}`);
-
-        
-
-        io.to(`user_${req.body.userId}`).emit('order_update');
-
-        res.json({ success: true });
+        await logBalance(pool, req.body.userId, '客服后台充值', req.body.type === 'add' ? val : (req.body.type === 'subtract' ? -val : 0), req.body.type === 'set' ? `客服重置余额为 ${val}` : `客服后台操作 ${req.body.type}`);
+        
+        const updatedBalanceRes = await pool.query("SELECT balance FROM users WHERE id = $1", [req.body.userId]);
+        io.to(`user_${req.body.userId}`).emit('order_update', { balance: updatedBalanceRes.rows[0].balance });
+        res.json({ success: true });
 
     } catch (e) {
 
@@ -5469,18 +5420,13 @@ app.post('/api/upload', adminAuth, upload.single('file'), async (req, res) => {
 
 
 app.post('/api/admin/order/ship', adminAuth, async (req, res) => {
-
-    try {
-
-        const result = await pool.query("UPDATE orders SET tracking_number = $1, status = '已发货' WHERE order_id = $2 RETURNING user_id", [req.body.trackingNumber, req.body.orderId]);
-
-        if (result.rows.length > 0) {
-
-            const userId = result.rows[0].user_id;
-
-            io.to(`user_${userId}`).emit('order_update');
-
-            const notifySid = `user_${userId}`;
+    try {
+        const result = await pool.query("UPDATE orders SET tracking_number = $1, status = '已发货' WHERE order_id = $2 RETURNING user_id", [req.body.trackingNumber, req.body.orderId]);
+        if (result.rows.length > 0) {
+            const userId = result.rows[0].user_id;
+            const updatedOrderRes = await pool.query("SELECT * FROM orders WHERE order_id = $1", [req.body.orderId]);
+            io.to(`user_${userId}`).emit('order_update', { order: updatedOrderRes.rows[0] });
+            const notifySid = `user_${userId}`;
 
             const content = `✅ 您的订单（单号：${req.body.orderId}）已发货！\n📦 物流单号：${req.body.trackingNumber}`;
 
@@ -5535,18 +5481,15 @@ app.post('/api/admin/order/ship', adminAuth, async (req, res) => {
 
 
 app.post('/api/admin/order/upload_qrcode', adminAuth, upload.single('qrcode'), async (req, res) => {
-
-    if (req.file) {
-
-        try {
-
-            const result = await pool.query("UPDATE orders SET qrcode_url = $1, expires_at = NOW() + INTERVAL '30 minutes' WHERE order_id = $2 RETURNING user_id", [await uploadToCloud(req.file.buffer), req.body.orderId]);
-
-            sendTgNotify(`✅ <b>收款码已上传</b>\n单号: <code>${req.body.orderId}</code>`);
-
-            if (result.rows[0]?.user_id) io.to(`user_${result.rows[0].user_id}`).emit('order_update');
-
-            notifyAdminUpdate('order');
+    if (req.file) {
+        try {
+            const result = await pool.query("UPDATE orders SET qrcode_url = $1, expires_at = NOW() + INTERVAL '30 minutes' WHERE order_id = $2 RETURNING user_id", [await uploadToCloud(req.file.buffer), req.body.orderId]);
+            sendTgNotify(`✅ <b>收款码已上传</b>\n单号: <code>${req.body.orderId}</code>`);
+            if (result.rows[0]?.user_id) {
+                const updatedOrderRes = await pool.query("SELECT * FROM orders WHERE order_id = $1", [req.body.orderId]);
+                io.to(`user_${result.rows[0].user_id}`).emit('order_update', { order: updatedOrderRes.rows[0] });
+            }
+            notifyAdminUpdate('order');
 
             res.json({ success: true });
 
@@ -5953,19 +5896,14 @@ app.post('/api/admin/order/cancel', adminAuth, async (req, res) => {
         
 
         if (parseFloat(order.balance_deducted) > 0 && order.status === '待支付') {
-
-            await client.query('UPDATE users SET balance = balance + $1 WHERE id = $2', [parseFloat(order.balance_deducted), order.user_id]);
-
-            await logBalance(client, order.user_id, '订单取消', parseFloat(order.balance_deducted), `管理员取消订单 ${req.body.orderId} 退回余额`);
-
-        }
-
-        await client.query('COMMIT');
-
-        io.to(`user_${order.user_id}`).emit('order_update');
-
-        res.json({ success: true });
-
+            await client.query('UPDATE users SET balance = balance + $1 WHERE id = $2', [parseFloat(order.balance_deducted), order.user_id]);
+            await logBalance(client, order.user_id, '订单取消', parseFloat(order.balance_deducted), `管理员取消订单 ${req.body.orderId} 退回余额`);
+        }
+        await client.query('COMMIT');
+        const updatedOrderRes = await pool.query("SELECT * FROM orders WHERE order_id = $1", [req.body.orderId]);
+        const updatedBalanceRes = await pool.query("SELECT balance FROM users WHERE id = $1", [order.user_id]);
+        io.to(`user_${order.user_id}`).emit('order_update', { order: updatedOrderRes.rows[0], balance: updatedBalanceRes.rows[0].balance });
+        res.json({ success: true });
     } catch (e) {
 
         await client.query('ROLLBACK');
