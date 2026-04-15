@@ -984,18 +984,24 @@ const uploadToCloud = (buffer) => {
 
 const logBalance = async (client, userId, type, amount, remark) => {
 
-    const res = await client.query("SELECT balance FROM users WHERE id = $1", [userId]);
+    const res = await client.query("SELECT balance, contact FROM users WHERE id = $1", [userId]);
 
     const currentBal = res.rows[0] ? res.rows[0].balance : 0;
 
-    await client.query(
+    const contact = res.rows[0] ? res.rows[0].contact : '未知';
 
-        "INSERT INTO balance_logs (user_id, type, amount, remark, balance_after) VALUES ($1, $2, $3, $4, $5)",
+    const insertRes = await client.query(
+
+        "INSERT INTO balance_logs (user_id, type, amount, remark, balance_after) VALUES ($1, $2, $3, $4, $5) RETURNING *",
 
         [userId, type, amount, remark, currentBal]
 
     );
 
+    const logData = insertRes.rows[0];
+    logData.contact = contact;
+    notifyAdminUpdate('funds', { payload: logData });
+    notifyAdminUpdate('user_balance', { payload: { userId, balance: currentBal } });
 };
 
 
@@ -3808,9 +3814,10 @@ app.post('/api/user/register', async (req, res) => {
 
         await pool.query('INSERT INTO users (id, contact, password, balance, invite_code, invited_by, source) VALUES ($1, $2, $3, 0, $4, $5, $6)', [id, contact, hashedPassword, myInviteCode, inviterId, source || 'xaw888.com']);
 
-        notifyAdminUpdate();
+        const newUserRes = await pool.query('SELECT *, false as has_order FROM users WHERE id = $1', [id]);
+        notifyAdminUpdate('user_add', { payload: newUserRes.rows[0] });
 
-        res.json({ success: true, isNew: true, userId: id, uid: id, balance: 0, inviteCode: myInviteCode });
+        res.json({ success: true, isNew: true, userId: id, uid: id, balance: 0, inviteCode: myInviteCode });
 
     } catch (e) {
 
@@ -4178,28 +4185,24 @@ app.post('/api/order', async (req, res) => {
 
 
 
-        if (paymentMethod === 'USDT' || paymentMethod === 'usdt') {
-
+       if (paymentMethod === 'USDT' || paymentMethod === 'usdt') {
             startUSDTHTTPPolling();
-
         }
-
-        notifyAdminUpdate('order');
-
+        
+        const fullOrderRes = await client.query(`
+            SELECT o.*, u.contact as user_contact, u.id as user_display_id 
+            FROM orders o LEFT JOIN users u ON o.user_id = u.id 
+            WHERE o.order_id = $1
+        `, [orderId]);
+        notifyAdminUpdate('order', { payload: fullOrderRes.rows[0] });
+        
         res.json({ success: true, orderId, usdtAmount: finalUSDT.toFixed(2), cnyAmount, wallet, status: orderStatus });
-
     } catch (e) {
-
         await client.query('ROLLBACK');
-
         res.json({ success: false, msg: e.message });
-
     } finally {
-
         client.release();
-
     }
-
 });
 
 
@@ -4258,9 +4261,14 @@ app.post('/api/order/cancel', async (req, res) => {
 
         await client.query('COMMIT');
 
-        notifyAdminUpdate('order');
+        const fullOrderRes = await client.query(`
+            SELECT o.*, u.contact as user_contact, u.id as user_display_id 
+            FROM orders o LEFT JOIN users u ON o.user_id = u.id 
+            WHERE o.order_id = $1
+        `, [req.body.orderId]);
+        notifyAdminUpdate('order', { payload: fullOrderRes.rows[0] });
 
-        res.json({ success: true });
+        res.json({ success: true });
 
     } catch (e) {
 
@@ -4338,13 +4346,11 @@ app.post('/api/recharge', async (req, res) => {
 
         if (req.body.method === 'USDT' || req.body.method === 'usdt') {
 
-            startUSDTHTTPPolling();
+            startUSDTHTTPPolling();
 
-        }
+        }
 
-        notifyAdminUpdate('funds');
-
-        res.json({ success: true, orderId, usdtAmount: usdtAmount.toFixed(2), cnyAmount, wallet });
+        res.json({ success: true, orderId, usdtAmount: usdtAmount.toFixed(2), cnyAmount, wallet });
 
     } catch (e) {
 
@@ -4401,49 +4407,32 @@ app.get('/api/user/balance_logs', async (req, res) => {
 
 
 app.post('/api/order/confirm-payment', upload.single('file'), async (req, res) => {
-
     try {
-
         if (!req.file) return res.json({ success: false, msg: '请选择图片' });
-
         try {
-
             await bot.telegram.sendPhoto(TG_ADMIN_GROUP_ID, { source: req.file.buffer }, {
-
                 caption: `📸 <b>收到支付凭证</b>\n单号: <code>${req.body.orderId}</code>\n用户ID: ${req.body.userId}\n请核对金额后在后台确认。`,
-
                 parse_mode: 'HTML',
-
                 reply_markup: {
-
                     inline_keyboard: [[
-
                         { text: "✅ 已收到", callback_data: `pay_confirm_${req.body.orderId}_${req.body.userId}` },
-
                         { text: "❌ 未收到", callback_data: `pay_reject_${req.body.orderId}_${req.body.userId}` }
-
                     ]]
-
                 }
-
             });
-
         } catch (e) { console.error("发送支付凭证至TG失败:", e.message); }
-
         
-
         await pool.query("UPDATE orders SET proof = 'TG_SENT', status = '待审核' WHERE order_id = $1", [req.body.orderId]);
-
-        notifyAdminUpdate('order');
-
+        const fullOrderRes = await pool.query(`
+            SELECT o.*, u.contact as user_contact, u.id as user_display_id 
+            FROM orders o LEFT JOIN users u ON o.user_id = u.id 
+            WHERE o.order_id = $1
+        `, [req.body.orderId]);
+        notifyAdminUpdate('order', { payload: fullOrderRes.rows[0] });
         res.json({ success: true });
-
     } catch (e) {
-
         res.json({ success: false, msg: "网络繁忙，请联系客服核实" });
-
     }
-
 });
 
 
@@ -4606,41 +4595,26 @@ app.post('/api/withdraw', upload.single('file'), async (req, res) => {
 
         
 
-        const withdrawId = (await pool.query('INSERT INTO withdrawals (user_id, amount, address) VALUES ($1, $2, $3) RETURNING id', [req.body.userId, amount, req.file ? `[${req.body.method}] 收款码已发送` : (req.body.address || '无账号信息')])).rows[0].id;
-
+       const withdrawId = (await pool.query('INSERT INTO withdrawals (user_id, amount, address) VALUES ($1, $2, $3) RETURNING id', [req.body.userId, amount, req.file ? `[${req.body.method}] 收款码已发送` : (req.body.address || '无账号信息')])).rows[0].id;
         
-
         const options = {
-
             caption: `💸 <b>新提现申请 (${req.body.method})</b>\n用户: ${user.contact} (ID: ${req.body.userId})\n金额: ${amount} USDT\n账号: ${req.body.address || '无账号信息'}\nID: ${withdrawId}`,
-
             parse_mode: 'HTML',
-
             reply_markup: {
-
                 inline_keyboard: [[
-
                     { text: "✅ 已打款", callback_data: `wd_confirm_${withdrawId}_${req.body.userId}` },
-
                     { text: "❌ 驳回", callback_data: `wd_reject_${withdrawId}_${req.body.userId}_${amount}` }
-
                 ]]
-
             }
-
         };
-
         
-
         if (req.file) await bot.telegram.sendPhoto(TG_ADMIN_GROUP_ID, { source: req.file.buffer }, options);
 
-        else await bot.telegram.sendMessage(TG_ADMIN_GROUP_ID, options.caption, options);
+        else await bot.telegram.sendMessage(TG_ADMIN_GROUP_ID, options.caption, options);
 
-        
+        
 
-        notifyAdminUpdate('funds');
-
-        res.json({ success: true });
+        res.json({ success: true });
 
     } catch (e) {
 
@@ -5468,14 +5442,17 @@ app.post('/api/admin/order/ship', adminAuth, async (req, res) => {
 
         sendTgNotify(`🚚 <b>订单已发货</b>\n单号: <code>${req.body.orderId}</code>\n物流: ${req.body.trackingNumber}`);
 
+        const fullOrderRes = await pool.query(`
+            SELECT o.*, u.contact as user_contact, u.id as user_display_id 
+            FROM orders o LEFT JOIN users u ON o.user_id = u.id 
+            WHERE o.order_id = $1
+        `, [req.body.orderId]);
+        notifyAdminUpdate('order', { payload: fullOrderRes.rows[0] });
+
         res.json({ success: true });
-
     } catch (e) {
-
         res.status(500).json({ success: false, msg: e.message });
-
     }
-
 });
 
 
@@ -5489,24 +5466,21 @@ app.post('/api/admin/order/upload_qrcode', adminAuth, upload.single('qrcode'), a
                 const updatedOrderRes = await pool.query("SELECT * FROM orders WHERE order_id = $1", [req.body.orderId]);
                 io.to(`user_${result.rows[0].user_id}`).emit('order_update', { order: updatedOrderRes.rows[0] });
             }
-            notifyAdminUpdate('order');
+            const fullOrderRes = await pool.query(`
+                SELECT o.*, u.contact as user_contact, u.id as user_display_id 
+                FROM orders o LEFT JOIN users u ON o.user_id = u.id 
+                WHERE o.order_id = $1
+            `, [req.body.orderId]);
+            notifyAdminUpdate('order', { payload: fullOrderRes.rows[0] });
 
             res.json({ success: true });
-
         } catch (e) {
-
             res.json({ success: false, msg: 'Upload failed' });
-
         }
-
     } else {
-
         res.json({ success: false });
-
     }
-
 });
-
 
 
 app.post('/api/admin/update/announcement', adminAuth, async (req, res) => {
@@ -5765,26 +5739,23 @@ app.post('/api/admin/confirm_pay', adminAuth, async (req, res) => {
 
             }
 
-           await client.query('COMMIT');
-
+          await client.query('COMMIT');
             const updatedOrderRes = await pool.query("SELECT * FROM orders WHERE order_id = $1", [req.body.orderId]);
-
             const updatedBalanceRes = await pool.query("SELECT balance FROM users WHERE id = $1", [order.user_id]);
-
             io.to(`user_${order.user_id}`).emit('order_update', { order: updatedOrderRes.rows[0], balance: updatedBalanceRes.rows[0].balance });
-
-            notifyAdminUpdate('order');
-
+            
+            const fullOrderRes = await pool.query(`
+                SELECT o.*, u.contact as user_contact, u.id as user_display_id 
+                FROM orders o LEFT JOIN users u ON o.user_id = u.id 
+                WHERE o.order_id = $1
+            `, [req.body.orderId]);
+            notifyAdminUpdate('order', { payload: fullOrderRes.rows[0] });
+            
             res.json({ success: true });
-
         } else {
-
             await client.query('ROLLBACK');
-
             res.json({ success: false, msg: '订单状态已经是已支付，请勿重复操作' });
-
         }
-
     } catch (e) {
 
         await client.query('ROLLBACK');
@@ -5903,19 +5874,20 @@ app.post('/api/admin/order/cancel', adminAuth, async (req, res) => {
         const updatedOrderRes = await pool.query("SELECT * FROM orders WHERE order_id = $1", [req.body.orderId]);
         const updatedBalanceRes = await pool.query("SELECT balance FROM users WHERE id = $1", [order.user_id]);
         io.to(`user_${order.user_id}`).emit('order_update', { order: updatedOrderRes.rows[0], balance: updatedBalanceRes.rows[0].balance });
-        res.json({ success: true });
+       const fullOrderRes = await pool.query(`
+            SELECT o.*, u.contact as user_contact, u.id as user_display_id 
+            FROM orders o LEFT JOIN users u ON o.user_id = u.id 
+            WHERE o.order_id = $1
+        `, [req.body.orderId]);
+        notifyAdminUpdate('order', { payload: fullOrderRes.rows[0] });
+
+        res.json({ success: true });
     } catch (e) {
-
         await client.query('ROLLBACK');
-
         res.json({ success: false, msg: e.message });
-
     } finally {
-
         client.release();
-
     }
-
 });
 
 
@@ -6084,9 +6056,16 @@ async function startUSDTHTTPPolling() {
 
                     });
 
-                    const orderData = tgOrderMessages.get(order_id);
+                    const fullAdminOrderRes = await pool.query(`
+                        SELECT o.*, u.contact as user_contact, u.id as user_display_id 
+                        FROM orders o LEFT JOIN users u ON o.user_id = u.id 
+                        WHERE o.order_id = $1
+                    `, [order_id]);
+                    notifyAdminUpdate('order', { payload: fullAdminOrderRes.rows[0] });
 
-                    const successMsg = `✅ <b>该用户已支付</b>\n USDT 自动回调成功\n单号: ${order_id}\n金额: ${amount}`;
+                    const orderData = tgOrderMessages.get(order_id);
+
+                    const successMsg = `✅ <b>该用户已支付</b>\n USDT 自动回调成功\n单号: ${order_id}\n金额: ${amount}`;
 
                     
 
@@ -6638,21 +6617,21 @@ setInterval(async () => {
 
             for (const order of timeoutOrders.rows) {
 
-                await client.query("UPDATE orders SET status = '已关闭' WHERE order_id = $1", [order.order_id]);
+                await client.query("UPDATE orders SET status = '已关闭' WHERE order_id = $1", [order.order_id]);
 
-                if (parseFloat(order.balance_deducted) > 0) {
+                if (parseFloat(order.balance_deducted) > 0) {
 
-                    await client.query('UPDATE users SET balance = balance + $1 WHERE id = $2', [parseFloat(order.balance_deducted), order.user_id]);
+                    await client.query('UPDATE users SET balance = balance + $1 WHERE id = $2', [parseFloat(order.balance_deducted), order.user_id]);
 
-                    await logBalance(client, order.user_id, '订单超时', parseFloat(order.balance_deducted), `订单 ${order.order_id} 超时关闭退回余额`);
+                    await logBalance(client, order.user_id, '订单超时', parseFloat(order.balance_deducted), `订单 ${order.order_id} 超时关闭退回余额`);
 
-                }
+                }
 
-            }
+                const fullOrderRes = await client.query(`SELECT o.*, u.contact as user_contact, u.id as user_display_id FROM orders o LEFT JOIN users u ON o.user_id = u.id WHERE o.order_id = $1`, [order.order_id]);
+                notifyAdminUpdate('order', { payload: fullOrderRes.rows[0] });
+            }
 
-            await client.query('COMMIT');
-
-            notifyAdminUpdate('order');
+            await client.query('COMMIT');
 
         }
 
