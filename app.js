@@ -3441,69 +3441,53 @@ app.get('/api/admin/stats', adminAuth, async (req, res) => {
 
 
 app.get('/api/public/data', async (req, res) => {
-
-    try {
-
-        const prods = await pool.query('SELECT * FROM products ORDER BY is_pinned DESC, id DESC');
-
-        const hiring = await pool.query('SELECT * FROM hiring');
-
-        const rate = await getSetting('rate');
-
-        const feeRate = await getSetting('feeRate');
-
-        const announcement = await getSetting('announcement');
-
-        const popup = await getSetting('popup');
-
-        const wallet = await getSetting('walletAddress');
-
-        
-
-        const distinctCats = [...new Set(prods.rows.map(p => p.category))];
-
-        const prioritiesRes = await pool.query('SELECT name, priority FROM categories');
-
-        const pMap = {};
-
-        prioritiesRes.rows.forEach(r => pMap[r.name] = r.priority);
-
-        const categories = distinctCats.sort((a, b) => (pMap[b] || 0) - (pMap[a] || 0));
-
-        
-
-        res.json({
-
-            success: true,
-
-            products: prods.rows,
-
-            categories,
-
-            hiring: hiring.rows,
-
-            rate: parseFloat(rate || 0),
-
-            feeRate: parseFloat(feeRate || 0),
-
-            announcement: announcement || "暂无公告",
-
-            showPopup: popup,
-
-            wallet: wallet || ""
-
-        });
-
-    } catch (e) {
-
-        console.error("❌ 接口 /api/public/data 报错:");
-
-        console.error(e);
-
-        res.status(500).json({ success: false, error: e.message });
-
+    // 1. 防御探测：检查请求头暗号。如果没有暗号，随便返回点无害的假数据打发爬虫
+    if (req.headers['x-nexus-client'] !== 'v1.0') {
+        const fakeData = { products: [], categories: ["Digital", "Services"], announcement: "Welcome to Nexus" };
+        const fakeEncoded = Buffer.from(JSON.stringify(fakeData), 'utf8').toString('base64');
+        return res.json({ success: true, data: fakeEncoded });
     }
 
+    try {
+        const prods = await pool.query('SELECT * FROM products ORDER BY is_pinned DESC, id DESC');
+        const hiring = await pool.query('SELECT * FROM hiring');
+        const rate = await getSetting('rate');
+        const feeRate = await getSetting('feeRate');
+        const announcement = await getSetting('announcement');
+        const popup = await getSetting('popup');
+        const wallet = await getSetting('walletAddress');
+        
+        const distinctCats = [...new Set(prods.rows.map(p => p.category))];
+        const prioritiesRes = await pool.query('SELECT name, priority FROM categories');
+        const pMap = {};
+        prioritiesRes.rows.forEach(r => pMap[r.name] = r.priority);
+        const categories = distinctCats.sort((a, b) => (pMap[b] || 0) - (pMap[a] || 0));
+        
+        // 2. 将真实数据打包
+        const realData = {
+            products: prods.rows,
+            categories,
+            hiring: hiring.rows,
+            rate: parseFloat(rate || 0),
+            feeRate: parseFloat(feeRate || 0),
+            announcement: announcement || "暂无公告",
+            showPopup: popup,
+            wallet: wallet || ""
+        };
+
+        // 3. 核心混淆：将真实 JSON 转换为 Base64 字符串 (使用 utf8 防止中文乱码)
+        const encodedData = Buffer.from(JSON.stringify(realData), 'utf8').toString('base64');
+        
+        // 4. 只返回混淆后的字符串
+        res.json({
+            success: true,
+            data: encodedData
+        });
+    } catch (e) {
+        console.error("❌ 接口 /api/public/data 报错:");
+        console.error(e);
+        res.status(500).json({ success: false, error: e.message });
+    }
 });
 
 
