@@ -5211,6 +5211,24 @@ app.post('/api/admin/product/hot', adminAuth, async (req, res) => {
     }
 
 });
+app.post('/api/admin/product/batch-subcategory', adminAuth, async (req, res) => {
+    try {
+        const { ids, category, subCategory } = req.body;
+        if (!Array.isArray(ids)) return res.json({ success: false });
+        
+        await pool.query(
+            'UPDATE products SET category = $1, sub_category = $2 WHERE id = ANY($3)',
+            [category, subCategory || null, ids.map(id => Number(id))]
+        );
+
+        // 局部静默刷新的关键：通过 Socket 告知前端哪些商品变了
+        io.emit('products_category_changed', { ids, category, sub_category: subCategory || null });
+        
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
 
 
 
