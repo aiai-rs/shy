@@ -4810,41 +4810,35 @@ app.get('/api/admin/products', adminAuth, async (req, res) => {
 
 
 
-        const [productsRes, countRes, categoriesRes] = await Promise.all([
+        const [productsRes, countRes, categoriesRes, priorityRes] = await Promise.all([
+                pool.query(query, params),
+                pool.query(countQuery, category ? [category] : []),
+                pool.query('SELECT DISTINCT category FROM products WHERE category IS NOT NULL AND category != \'\''),
+                pool.query('SELECT name, priority FROM categories')
+            ]);
 
-            pool.query(query, params),
+            const total = parseInt(countRes.rows[0].total);
+            const totalPages = Math.ceil(total / limit);
+            const categories = categoriesRes.rows.map(r => r.category);
 
-            pool.query(countQuery, category ? [category] : []),
+            const priorityMap = {};
+            priorityRes.rows.forEach(r => { priorityMap[r.name] = r.priority; });
 
-            pool.query('SELECT DISTINCT category FROM products WHERE category IS NOT NULL AND category != \'\'')
+            const productsWithPriority = productsRes.rows.map(p => {
+                if (p.sub_category && priorityMap[p.sub_category] !== undefined) {
+                    p._sub_priority = priorityMap[p.sub_category];
+                }
+                return p;
+            });
 
-        ]);
-
-
-
-        const total = parseInt(countRes.rows[0].total);
-
-        const totalPages = Math.ceil(total / limit);
-
-        const categories = categoriesRes.rows.map(r => r.category);
-
-
-
-        res.json({
-
-            success: true,
-
-            products: productsRes.rows,
-
-            total,
-
-            totalPages,
-
-            currentPage: page,
-
-            categories
-
-        });
+            res.json({
+                success: true,
+                products: productsWithPriority,
+                total,
+                totalPages,
+                currentPage: page,
+                categories
+            });
 
     } catch (e) {
 
