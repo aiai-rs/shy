@@ -678,19 +678,15 @@ const initDB = async () => {
 
 
 
-        try {
-
-            await client.query("ALTER TABLE products ADD COLUMN IF NOT EXISTS variants JSONB DEFAULT '[]'::jsonb");
-
-            await client.query("ALTER TABLE products ADD COLUMN IF NOT EXISTS is_hot BOOLEAN DEFAULT FALSE");
-
-            await client.query("ALTER TABLE products ADD COLUMN IF NOT EXISTS hot_time TIMESTAMP");
-
-        } catch (e) {
-
-            console.error("扩展产品字段失败:", e.message);
-
-        }
+       try {
+            await client.query("ALTER TABLE products ADD COLUMN IF NOT EXISTS variants JSONB DEFAULT '[]'::jsonb");
+            await client.query("ALTER TABLE products ADD COLUMN IF NOT EXISTS is_hot BOOLEAN DEFAULT FALSE");
+            await client.query("ALTER TABLE products ADD COLUMN IF NOT EXISTS hot_time TIMESTAMP");
+            await client.query("ALTER TABLE products ADD COLUMN IF NOT EXISTS sub_category TEXT");
+            await client.query("ALTER TABLE categories ADD COLUMN IF NOT EXISTS parent_name TEXT");
+        } catch (e) {
+            console.error("扩展产品字段失败:", e.message);
+        }
 
 
 
@@ -3458,16 +3454,21 @@ app.get('/api/public/data', async (req, res) => {
         const wallet = await getSetting('walletAddress');
         
         const distinctCats = [...new Set(prods.rows.map(p => p.category))];
-        const prioritiesRes = await pool.query('SELECT name, priority FROM categories');
-        const pMap = {};
-        prioritiesRes.rows.forEach(r => pMap[r.name] = r.priority);
-        const categories = distinctCats.sort((a, b) => (pMap[b] || 0) - (pMap[a] || 0));
-        
-        // 2. 将真实数据打包
-        const realData = {
-            products: prods.rows,
-            categories,
-            hiring: hiring.rows,
+        const prioritiesRes = await pool.query('SELECT name, priority FROM categories');
+        const pMap = {};
+        prioritiesRes.rows.forEach(r => pMap[r.name] = r.priority);
+        const sortedMainCats = distinctCats.sort((a, b) => (pMap[b] || 0) - (pMap[a] || 0));
+        
+        const categories = sortedMainCats.map(mainCat => {
+            const subs = [...new Set(prods.rows.filter(p => p.category === mainCat && p.sub_category).map(p => p.sub_category))];
+            return { main: mainCat, subs: subs };
+        });
+        
+        // 2. 将真实数据打包
+        const realData = {
+            products: prods.rows,
+            categories,
+            hiring: hiring.rows,
             rate: parseFloat(rate || 0),
             feeRate: parseFloat(feeRate || 0),
             announcement: announcement || "暂无公告",
@@ -5527,95 +5528,98 @@ app.post('/api/admin/chat/recall', adminAuth, async (req, res) => {
 
 app.post('/api/admin/product', adminAuth, upload.single('file'), async (req, res) => {
 
-    try {
+    try {
 
-        const id = Date.now();
+        const id = Date.now();
 
-        const imageUrl = req.file ? await uploadToCloud(req.file.buffer) : req.body.imageUrl || '';
+        const imageUrl = req.file ? await uploadToCloud(req.file.buffer) : req.body.imageUrl || '';
 
-        const variants = req.body.variants || '[]';
+        const variants = req.body.variants || '[]';
 
-        await pool.query('INSERT INTO products (id, name, price, category, type, description, image_url, variants) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)', [id, req.body.name, req.body.price, req.body.category, req.body.type, req.body.desc, imageUrl, variants]);
+        await pool.query('INSERT INTO products (id, name, price, category, sub_category, type, description, image_url, variants) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)', [id, req.body.name, req.body.price, req.body.category, req.body.subCategory || null, req.body.type, req.body.desc, imageUrl, variants]);
 
-        io.emit('product_added', {
+        io.emit('product_added', {
 
-            id: id,
+            id: id,
 
-            name: req.body.name,
+            name: req.body.name,
 
-            price: req.body.price,
+            price: req.body.price,
 
-            category: req.body.category,
+            category: req.body.category,
 
-            type: req.body.type,
+            sub_category: req.body.subCategory || null,
 
-            description: req.body.desc,
+            type: req.body.type,
 
-            image_url: imageUrl,
+            description: req.body.desc,
 
-            variants: variants,
+            image_url: imageUrl,
 
-            is_pinned: false,
+            variants: variants,
 
-            is_hot: false,
+            is_pinned: false,
 
-            hot_time: null // 必须显式传递，否则前端排序函数 compare(a, b) 读取 a.hot_time 时会崩溃
+            is_hot: false,
 
-        });
+            hot_time: null // 必须显式传递，否则前端排序函数 compare(a, b) 读取 a.hot_time 时会崩溃
 
-        res.json({ success: true });
+        });
 
-    } catch (e) {
+        res.json({ success: true });
 
-        res.json({ success: false, msg: e.message });
+    } catch (e) {
 
-    }
+        res.json({ success: false, msg: e.message });
+
+    }
 
 });
 
 
-
 app.put('/api/admin/product/:id', adminAuth, async (req, res) => {
 
-    // 先查出原有的热销状态，防止覆盖丢失
+    // 先查出原有的热销状态，防止覆盖丢失
 
-    const oldProd = await pool.query('SELECT is_hot, is_pinned, hot_time FROM products WHERE id = $1', [req.params.id]);
+    const oldProd = await pool.query('SELECT is_hot, is_pinned, hot_time FROM products WHERE id = $1', [req.params.id]);
 
-    const { is_hot, is_pinned, hot_time } = oldProd.rows[0] || {};
+    const { is_hot, is_pinned, hot_time } = oldProd.rows[0] || {};
 
 
 
-    await pool.query('UPDATE products SET name=$1, price=$2, category=$3, type=$4, description=$5, image_url=$6, variants=$7 WHERE id=$8', [req.body.name, req.body.price, req.body.category, req.body.type, req.body.desc, req.body.imageUrl, req.body.variants || '[]', req.params.id]);
+    await pool.query('UPDATE products SET name=$1, price=$2, category=$3, sub_category=$4, type=$5, description=$6, image_url=$7, variants=$8 WHERE id=$9', [req.body.name, req.body.price, req.body.category, req.body.subCategory || null, req.body.type, req.body.desc, req.body.imageUrl, req.body.variants || '[]', req.params.id]);
 
-    
+    
 
-    io.emit('product_updated', {
+    io.emit('product_updated', {
 
-        id: Number(req.params.id),
+        id: Number(req.params.id),
 
-        name: req.body.name,
+        name: req.body.name,
 
-        price: req.body.price,
+        price: req.body.price,
 
-        category: req.body.category,
+        category: req.body.category,
 
-        type: req.body.type,
+        sub_category: req.body.subCategory || null,
 
-        description: req.body.desc,
+        type: req.body.type,
 
-        image_url: req.body.imageUrl,
+        description: req.body.desc,
 
-        variants: req.body.variants || '[]',
+        image_url: req.body.imageUrl,
 
-        is_hot: is_hot,
+        variants: req.body.variants || '[]',
 
-        is_pinned: is_pinned,
+        is_hot: is_hot,
 
-        hot_time: hot_time
+        is_pinned: is_pinned,
 
-    });
+        hot_time: hot_time
 
-    res.json({ success: true });
+    });
+
+    res.json({ success: true });
 
 });
 
