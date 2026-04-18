@@ -3460,9 +3460,10 @@ app.get('/api/public/data', async (req, res) => {
         const sortedMainCats = distinctCats.sort((a, b) => (pMap[b] || 0) - (pMap[a] || 0));
         
         const categories = sortedMainCats.map(mainCat => {
-            const subs = [...new Set(prods.rows.filter(p => p.category === mainCat && p.sub_category).map(p => p.sub_category))];
-            return { main: mainCat, subs: subs };
-        });
+            const subs = [...new Set(prods.rows.filter(p => p.category === mainCat && p.sub_category).map(p => p.sub_category))];
+            subs.sort((a, b) => (pMap[b] || 0) - (pMap[a] || 0));
+            return { main: mainCat, subs: subs };
+        });
         
         // 2. 将真实数据打包
         const realData = {
