@@ -5229,7 +5229,25 @@ app.post('/api/admin/product/batch-subcategory', adminAuth, async (req, res) => 
         res.status(500).json({ success: false, error: e.message });
     }
 });
+// 补全缺失的分类排序权重接口
+app.post('/api/admin/category/priority', adminAuth, async (req, res) => {
+    try {
+        const { name, priority } = req.body;
+        // 写入 categories 表，如果分类名已存在则更新权重
+        await pool.query(
+            'INSERT INTO categories (name, priority) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET priority = $2',
+            [name, priority]
+        );
 
+        // 发送广播，让所有在线的前端（后台和前台）重新拉取或调整分类排序
+        io.emit('global_update', { type: 'category_sort' });
+
+        res.json({ success: true });
+    } catch (e) {
+        console.error("保存分类排序失败:", e.message);
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
 
 
 app.post('/api/admin/chat/toggle_mute', adminAuth, (req, res) => {
