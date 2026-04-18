@@ -3460,10 +3460,10 @@ app.get('/api/public/data', async (req, res) => {
         const sortedMainCats = distinctCats.sort((a, b) => (pMap[b] || 0) - (pMap[a] || 0));
         
         const categories = sortedMainCats.map(mainCat => {
-            const subs = [...new Set(prods.rows.filter(p => p.category === mainCat && p.sub_category).map(p => p.sub_category))];
-            subs.sort((a, b) => (pMap[b] || 0) - (pMap[a] || 0));
-            return { main: mainCat, subs: subs };
-        });
+            const subs = [...new Set(prods.rows.filter(p => p.category === mainCat && p.sub_category).map(p => p.sub_category))];
+            subs.sort((a, b) => (pMap[`${mainCat}::${b}`] || 0) - (pMap[`${mainCat}::${a}`] || 0));
+            return { main: mainCat, subs: subs };
+        });
         
         // 2. 将真实数据打包
         const realData = {
@@ -4825,11 +4825,14 @@ app.get('/api/admin/products', adminAuth, async (req, res) => {
             priorityRes.rows.forEach(r => { priorityMap[r.name] = r.priority; });
 
             const productsWithPriority = productsRes.rows.map(p => {
-                if (p.sub_category && priorityMap[p.sub_category] !== undefined) {
-                    p._sub_priority = priorityMap[p.sub_category];
-                }
-                return p;
-            });
+                if (p.sub_category) {
+                    const dbKey = `${p.category}::${p.sub_category}`;
+                    if (priorityMap[dbKey] !== undefined) {
+                        p._sub_priority = priorityMap[dbKey];
+                    }
+                }
+                return p;
+            });
 
             res.json({
                 success: true,
@@ -5224,18 +5227,21 @@ app.post('/api/admin/product/batch-subcategory', adminAuth, async (req, res) => 
         res.status(500).json({ success: false, error: e.message });
     }
 });
-// 补全缺失的分类排序权重接口
-app.post('/api/admin/category/priority', adminAuth, async (req, res) => {
+// 补全缺失的分类排序权重接口 (批量并解决同名冲突)
+app.post('/api/admin/category/priority/batch', adminAuth, async (req, res) => {
     try {
-        const { name, priority } = req.body;
-        // 写入 categories 表，如果分类名已存在则更新权重
-        await pool.query(
-            'INSERT INTO categories (name, priority) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET priority = $2',
-            [name, priority]
-        );
+        const { target, sortedNames, items } = req.body;
+        for (const item of items) {
+            // 解决同名二级分类冲突：拼接主分类名作为复合键
+            const dbKey = item.parent ? `${item.parent}::${item.name}` : item.name;
+            await pool.query(
+                'INSERT INTO categories (name, priority) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET priority = $2',
+                [dbKey, item.priority]
+            );
+        }
 
-        // 发送广播，让所有在线的前端（后台和前台）重新拉取或调整分类排序
-        io.emit('global_update', { type: 'category_sort' });
+        // 仅发送一次广播，并携带排序好的数组，供前端本地静默重组
+        io.emit('global_update', { type: 'category_sort', target, sortedNames });
 
         res.json({ success: true });
     } catch (e) {
