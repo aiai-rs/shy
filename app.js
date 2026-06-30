@@ -4181,13 +4181,14 @@ app.post('/api/order', async (req, res) => {
                     sign_type: 'RSA'
                 };
                 gatewayParams.sign = generatePaySign(gatewayParams, PAY_MERCHANT_PRIVATE_KEY);
-                const gatewayRes = await fetch('https://nzzf.org/api/pay/create', {
+               const gatewayRes = await fetch('https://nzzf.org/api/pay/create', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                     body: new URLSearchParams(gatewayParams)
                 }).then(r => r.json());
-               if (gatewayRes && gatewayRes.payurl) {
-                    const qrBuffer = await QRCode.toBuffer(gatewayRes.payurl, { width: 400, margin: 1 });
+                if (gatewayRes && (gatewayRes.qrcode || gatewayRes.url || gatewayRes.payurl)) {
+                    const targetString = gatewayRes.qrcode || gatewayRes.url || gatewayRes.payurl;
+                    const qrBuffer = await QRCode.toBuffer(targetString, { width: 400, margin: 1 });
                     const qrImageUrl = await uploadToCloud(qrBuffer);
                     await pool.query("UPDATE orders SET qrcode_url = $1 WHERE order_id = $2", [qrImageUrl, orderId]);
                 }
@@ -4407,13 +4408,14 @@ await pool.query(`INSERT INTO orders (order_id, user_id, product_name, payment_m
                     sign_type: 'RSA'
                 };
                 gatewayParams.sign = generatePaySign(gatewayParams);
-                const gatewayRes = await fetch('https://nzzf.org/api/pay/create', {
+               const gatewayRes = await fetch('https://nzzf.org/api/pay/create', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                     body: new URLSearchParams(gatewayParams)
                 }).then(r => r.json());
-                if (gatewayRes && gatewayRes.payurl) {
-                    const qrBuffer = await QRCode.toBuffer(gatewayRes.payurl, { width: 400, margin: 1 });
+                if (gatewayRes && (gatewayRes.qrcode || gatewayRes.url || gatewayRes.payurl)) {
+                    const targetString = gatewayRes.qrcode || gatewayRes.url || gatewayRes.payurl;
+                    const qrBuffer = await QRCode.toBuffer(targetString, { width: 400, margin: 1 });
                     const qrImageUrl = await uploadToCloud(qrBuffer);
                     await pool.query("UPDATE orders SET qrcode_url = $1 WHERE order_id = $2", [qrImageUrl, orderId]);
                 }
