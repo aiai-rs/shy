@@ -4400,7 +4400,7 @@ await pool.query(`INSERT INTO orders (order_id, user_id, product_name, payment_m
                     type: req.body.method,
                     out_trade_no: orderId,
                     notify_url: `${process.env.RENDER_EXTERNAL_URL}/api/pay/notify`,
-                    return_url: `https://${user.source || 'xaw888.com'}`,
+                    return_url: `https://${req.body.source || user.source || 'xaw888.com'}`,
                     name: '余额充值',
                     money: cnyAmount,
                     timestamp: Math.floor(Date.now() / 1000).toString(),
