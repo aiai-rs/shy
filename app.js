@@ -4186,7 +4186,7 @@ app.post('/api/order', async (req, res) => {
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                     body: new URLSearchParams(gatewayParams)
                 }).then(r => r.json());
-                if (gatewayRes.code === 0 && gatewayRes.payurl) {
+               if (gatewayRes && gatewayRes.payurl) {
                     const qrBuffer = await QRCode.toBuffer(gatewayRes.payurl, { width: 400, margin: 1 });
                     const qrImageUrl = await uploadToCloud(qrBuffer);
                     await pool.query("UPDATE orders SET qrcode_url = $1 WHERE order_id = $2", [qrImageUrl, orderId]);
@@ -4412,7 +4412,7 @@ await pool.query(`INSERT INTO orders (order_id, user_id, product_name, payment_m
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                     body: new URLSearchParams(gatewayParams)
                 }).then(r => r.json());
-                if (gatewayRes.code === 0 && gatewayRes.payurl) {
+                if (gatewayRes && gatewayRes.payurl) {
                     const qrBuffer = await QRCode.toBuffer(gatewayRes.payurl, { width: 400, margin: 1 });
                     const qrImageUrl = await uploadToCloud(qrBuffer);
                     await pool.query("UPDATE orders SET qrcode_url = $1 WHERE order_id = $2", [qrImageUrl, orderId]);
