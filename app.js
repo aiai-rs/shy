@@ -4181,12 +4181,15 @@ app.post('/api/order', async (req, res) => {
                     sign_type: 'RSA'
                 };
                 gatewayParams.sign = generatePaySign(gatewayParams, PAY_MERCHANT_PRIVATE_KEY);
-               const gatewayRes = await fetch('https://nzzf.org/api/pay/create', {
+              const gatewayRes = await fetch('https://nzzf.org/api/pay/create', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                     body: new URLSearchParams(gatewayParams)
                 }).then(r => r.json());
-                if (gatewayRes && (gatewayRes.qrcode || gatewayRes.url || gatewayRes.payurl)) {
+                
+                console.log("支付网关完整返回:", JSON.stringify(gatewayRes));
+
+                if (gatewayRes && gatewayRes.payurl) {
                     const targetString = gatewayRes.qrcode || gatewayRes.url || gatewayRes.payurl;
                     const qrBuffer = await QRCode.toBuffer(targetString, { width: 400, margin: 1 });
                     const qrImageUrl = await uploadToCloud(qrBuffer);
