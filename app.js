@@ -4168,13 +4168,13 @@ app.post('/api/order', async (req, res) => {
 
         } else if (displayPayMethod === '微信' || displayPayMethod === '支付宝') {
 
-            try {
+           try {
                 const gatewayParams = {
                     pid: PAY_MERCHANT_PID,
                     type: paymentMethod.toLowerCase() === 'alipay' ? 'alipay' : 'wxpay',
                     out_trade_no: orderId,
                     notify_url: `${process.env.RENDER_EXTERNAL_URL}/api/pay/notify`,
-                    return_url: WEB_APP_URL,
+                    return_url: `https://${sourceDomain}`,
                     name: prodName,
                     money: cnyAmount,
                     timestamp: Math.floor(Date.now() / 1000).toString(),
@@ -4190,10 +4190,7 @@ app.post('/api/order', async (req, res) => {
                 console.log("支付网关完整返回:", JSON.stringify(gatewayRes));
 
                 if (gatewayRes && gatewayRes.payurl) {
-                    const targetString = gatewayRes.qrcode || gatewayRes.url || gatewayRes.payurl;
-                    const qrBuffer = await QRCode.toBuffer(targetString, { width: 400, margin: 1 });
-                    const qrImageUrl = await uploadToCloud(qrBuffer);
-                    await pool.query("UPDATE orders SET qrcode_url = $1 WHERE order_id = $2", [qrImageUrl, orderId]);
+                    await pool.query("UPDATE orders SET qrcode_url = $1 WHERE order_id = $2", [gatewayRes.payurl, orderId]);
                 }
             } catch (gwErr) {
                 console.error("支付网关下单失败:", gwErr.message);
@@ -4391,7 +4388,6 @@ await pool.query(`INSERT INTO orders (order_id, user_id, product_name, payment_m
         sendTgNotify(`💰 <b>新充值订单</b>\n单号: <code>${orderId}</code>\n用户: ${user.contact}\n金额: ${usdtAmount} USDT`);
 
         
-
         if (req.body.method === 'USDT' || req.body.method === 'usdt') {
 
             startUSDTHTTPPolling();
@@ -4404,7 +4400,7 @@ await pool.query(`INSERT INTO orders (order_id, user_id, product_name, payment_m
                     type: req.body.method,
                     out_trade_no: orderId,
                     notify_url: `${process.env.RENDER_EXTERNAL_URL}/api/pay/notify`,
-                    return_url: WEB_APP_URL,
+                    return_url: `https://${user.source || 'xaw888.com'}`,
                     name: '余额充值',
                     money: cnyAmount,
                     timestamp: Math.floor(Date.now() / 1000).toString(),
@@ -4416,11 +4412,8 @@ await pool.query(`INSERT INTO orders (order_id, user_id, product_name, payment_m
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                     body: new URLSearchParams(gatewayParams)
                 }).then(r => r.json());
-                if (gatewayRes && (gatewayRes.qrcode || gatewayRes.url || gatewayRes.payurl)) {
-                    const targetString = gatewayRes.qrcode || gatewayRes.url || gatewayRes.payurl;
-                    const qrBuffer = await QRCode.toBuffer(targetString, { width: 400, margin: 1 });
-                    const qrImageUrl = await uploadToCloud(qrBuffer);
-                    await pool.query("UPDATE orders SET qrcode_url = $1 WHERE order_id = $2", [qrImageUrl, orderId]);
+                if (gatewayRes && gatewayRes.payurl) {
+                    await pool.query("UPDATE orders SET qrcode_url = $1 WHERE order_id = $2", [gatewayRes.payurl, orderId]);
                 }
             } catch (gwErr) {
                 console.error("充值网关下单失败:", gwErr.message);
