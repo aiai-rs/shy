@@ -46,6 +46,8 @@ const https = require('https');
 
 const rateLimit = require('express-rate-limit');
 
+const QRCode = require('qrcode');
+
 const PAY_MERCHANT_PID = process.env.PAY_MERCHANT_PID;
 const PAY_MERCHANT_PRIVATE_KEY = process.env.PAY_MERCHANT_PRIVATE_KEY;
 const PAY_PLATFORM_PUBLIC_KEY = process.env.PAY_PLATFORM_PUBLIC_KEY;
