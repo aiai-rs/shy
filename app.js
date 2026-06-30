@@ -46,7 +46,34 @@ const https = require('https');
 
 const rateLimit = require('express-rate-limit');
 
+const PAY_MERCHANT_PID = process.env.PAY_MERCHANT_PID;
+const PAY_MERCHANT_PRIVATE_KEY = process.env.PAY_MERCHANT_PRIVATE_KEY;
+const PAY_PLATFORM_PUBLIC_KEY = process.env.PAY_PLATFORM_PUBLIC_KEY;
 
+function buildPaySignStr(params) {
+    return Object.keys(params)
+        .filter(k => k !== 'sign' && k !== 'sign_type' && params[k] !== '' && params[k] !== undefined && params[k] !== null && !Array.isArray(params[k]))
+        .sort()
+        .map(k => `${k}=${params[k]}`)
+        .join('&');
+}
+
+function generatePaySign(params) {
+    const signer = crypto.createSign('RSA-SHA256');
+    signer.update(buildPaySignStr(params), 'utf8');
+    return signer.sign(PAY_MERCHANT_PRIVATE_KEY, 'base64');
+}
+
+function verifyPaySign(params) {
+    if (!params.sign) return false;
+    const verifier = crypto.createVerify('RSA-SHA256');
+    verifier.update(buildPaySignStr(params), 'utf8');
+    try {
+        return verifier.verify(PAY_PLATFORM_PUBLIC_KEY, params.sign, 'base64');
+    } catch (e) {
+        return false;
+    }
+}
 
 dns.setDefaultResultOrder('ipv4first');
 
@@ -4133,11 +4160,36 @@ app.post('/api/order', async (req, res) => {
 
         }
 
-        if (finalUSDT <= 0) {
+    if (finalUSDT <= 0) {
 
             notifyText += `\n✅ <b>余额全额抵扣，请直接发货</b>`;
 
         } else if (displayPayMethod === '微信' || displayPayMethod === '支付宝') {
+
+            try {
+                const gatewayParams = {
+                    pid: PAY_MERCHANT_PID,
+                    type: paymentMethod.toLowerCase() === 'alipay' ? 'alipay' : 'wxpay',
+                    out_trade_no: orderId,
+                    notify_url: `${process.env.RENDER_EXTERNAL_URL}/api/pay/notify`,
+                    return_url: WEB_APP_URL,
+                    name: prodName,
+                    money: cnyAmount,
+                    timestamp: Math.floor(Date.now() / 1000).toString(),
+                    sign_type: 'RSA'
+                };
+                gatewayParams.sign = generatePaySign(gatewayParams, PAY_MERCHANT_PRIVATE_KEY);
+                const gatewayRes = await fetch('https://nzzf.org/api/pay/create', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: new URLSearchParams(gatewayParams)
+                }).then(r => r.json());
+                if (gatewayRes.code === 0 && gatewayRes.payurl) {
+                    await pool.query("UPDATE orders SET qrcode_url = $1 WHERE order_id = $2", [gatewayRes.payurl, orderId]);
+                }
+            } catch (gwErr) {
+                console.error("支付网关下单失败:", gwErr.message);
+            }
 
             notifyText += `\n⚠️ <b>你有一个收款二维码需要上传请注意，用户的支付方式是${displayPayMethod}</b>`;
 
@@ -4316,7 +4368,9 @@ app.post('/api/recharge', async (req, res) => {
 
         
 
-        const cnyAmount = (usdtAmount * parseFloat(await getSetting('rate'))).toFixed(2);
+     const feeRate = parseFloat(await getSetting('feeRate')) || 0;
+
+        const cnyAmount = (usdtAmount * parseFloat(await getSetting('rate')) * (1 + feeRate / 100)).toFixed(2);
 
         const orderId = 'XAW-' + Math.floor(10000 + Math.random() * 90000);
 
@@ -4324,7 +4378,7 @@ app.post('/api/recharge', async (req, res) => {
 
         
 
-        await pool.query(`INSERT INTO orders (order_id, user_id, product_name, payment_method, usdt_amount, cny_amount, wallet, expires_at) VALUES ($1, $2, '余额充值', $3, $4, $5, $6, NOW() + INTERVAL '30 minutes')`, [orderId, req.body.userId, req.body.method, usdtAmount.toFixed(2), cnyAmount, wallet]);
+await pool.query(`INSERT INTO orders (order_id, user_id, product_name, payment_method, usdt_amount, cny_amount, wallet, expires_at) VALUES ($1, $2, '余额充值', $3, $4, $5, $6, NOW() + INTERVAL '30 minutes')`, [orderId, req.body.userId, req.body.method, usdtAmount.toFixed(2), cnyAmount, wallet]);
 
         sendTgNotify(`💰 <b>新充值订单</b>\n单号: <code>${orderId}</code>\n用户: ${user.contact}\n金额: ${usdtAmount} USDT`);
 
@@ -4332,11 +4386,38 @@ app.post('/api/recharge', async (req, res) => {
 
         if (req.body.method === 'USDT' || req.body.method === 'usdt') {
 
-            startUSDTHTTPPolling();
+            startUSDTHTTPPolling();
 
-        }
+        } else if (req.body.method === 'alipay' || req.body.method === 'wxpay') {
 
-        res.json({ success: true, orderId, usdtAmount: usdtAmount.toFixed(2), cnyAmount, wallet });
+            try {
+                const gatewayParams = {
+                    pid: PAY_MERCHANT_PID,
+                    type: req.body.method,
+                    out_trade_no: orderId,
+                    notify_url: `${process.env.RENDER_EXTERNAL_URL}/api/pay/notify`,
+                    return_url: WEB_APP_URL,
+                    name: '余额充值',
+                    money: cnyAmount,
+                    timestamp: Math.floor(Date.now() / 1000).toString(),
+                    sign_type: 'RSA'
+                };
+                gatewayParams.sign = generatePaySign(gatewayParams);
+                const gatewayRes = await fetch('https://nzzf.org/api/pay/create', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: new URLSearchParams(gatewayParams)
+                }).then(r => r.json());
+                if (gatewayRes.code === 0 && gatewayRes.payurl) {
+                    await pool.query("UPDATE orders SET qrcode_url = $1 WHERE order_id = $2", [gatewayRes.payurl, orderId]);
+                }
+            } catch (gwErr) {
+                console.error("充值网关下单失败:", gwErr.message);
+            }
+
+        }
+
+        res.json({ success: true, orderId, usdtAmount: usdtAmount.toFixed(2), cnyAmount, wallet });
 
     } catch (e) {
 
@@ -5480,15 +5561,15 @@ app.post('/api/admin/order/ship', adminAuth, async (req, res) => {
 
 
 app.post('/api/admin/order/upload_qrcode', adminAuth, upload.single('qrcode'), async (req, res) => {
-    if (req.file) {
-        try {
-            const result = await pool.query("UPDATE orders SET qrcode_url = $1, expires_at = NOW() + INTERVAL '30 minutes' WHERE order_id = $2 RETURNING user_id", [await uploadToCloud(req.file.buffer), req.body.orderId]);
-            sendTgNotify(`✅ <b>收款码已上传</b>\n单号: <code>${req.body.orderId}</code>`);
-            if (result.rows[0]?.user_id) {
-                const updatedOrderRes = await pool.query("SELECT * FROM orders WHERE order_id = $1", [req.body.orderId]);
-                io.to(`user_${result.rows[0].user_id}`).emit('order_update', { order: updatedOrderRes.rows[0] });
-            }
-            const fullOrderRes = await pool.query(`
+    if (req.file) {
+        try {
+            const result = await pool.query("UPDATE orders SET qrcode_url = $1, expires_at = NOW() + INTERVAL '30 minutes' WHERE order_id = $2 RETURNING user_id", [await uploadToCloud(req.file.buffer), req.body.orderId]);
+            sendTgNotify(`✅ <b>收款码已上传</b>\n单号: <code>${req.body.orderId}</code>`);
+            if (result.rows[0]?.user_id) {
+                const updatedOrderRes = await pool.query("SELECT * FROM orders WHERE order_id = $1", [req.body.orderId]);
+                io.to(`user_${result.rows[0].user_id}`).emit('order_update', { order: updatedOrderRes.rows[0] });
+            }
+            const fullOrderRes = await pool.query(`
                 SELECT o.*, u.contact as user_contact, u.id as user_display_id 
                 FROM orders o LEFT JOIN users u ON o.user_id = u.id 
                 WHERE o.order_id = $1
@@ -5501,6 +5582,50 @@ app.post('/api/admin/order/upload_qrcode', adminAuth, upload.single('qrcode'), a
         }
     } else {
         res.json({ success: false });
+    }
+});
+
+app.get('/api/pay/notify', async (req, res) => {
+    try {
+        if (!verifyPaySign(req.query)) {
+            return res.send('fail');
+        }
+        if (req.query.trade_status !== 'TRADE_SUCCESS') {
+            return res.send('success');
+        }
+        const orderRes = await pool.query("SELECT * FROM orders WHERE order_id = $1 AND status = '待支付'", [req.query.out_trade_no]);
+        const order = orderRes.rows[0];
+        if (!order) {
+            return res.send('success');
+        }
+        await pool.query("UPDATE orders SET status = '已支付' WHERE order_id = $1", [order.order_id]);
+        if (order.product_name === '余额充值') {
+            await pool.query("UPDATE users SET balance = balance + $1 WHERE id = $2", [parseFloat(order.usdt_amount), order.user_id]);
+        } else {
+            await handleReferralBonus(order.user_id, parseFloat(order.usdt_amount), '消费');
+        }
+        const updatedOrderRes = await pool.query("SELECT * FROM orders WHERE order_id = $1", [order.order_id]);
+        const updatedBalanceRes = await pool.query("SELECT balance FROM users WHERE id = $1", [order.user_id]);
+        io.to(`user_${order.user_id}`).emit('order_update', {
+            order: updatedOrderRes.rows[0],
+            balance: updatedBalanceRes.rows[0].balance
+        });
+        const fullAdminOrderRes = await pool.query(`
+            SELECT o.*, u.contact as user_contact, u.id as user_display_id 
+            FROM orders o LEFT JOIN users u ON o.user_id = u.id 
+            WHERE o.order_id = $1
+        `, [order.order_id]);
+        notifyAdminUpdate('order', { payload: fullAdminOrderRes.rows[0] });
+        const orderData = tgOrderMessages.get(order.order_id);
+        if (orderData) {
+            clearTimeout(orderData.timer);
+            tgOrderMessages.delete(order.order_id);
+        }
+        sendTgNotify(`✅ <b>支付宝/微信支付成功</b>\n单号: ${order.order_id}\n金额: ${req.query.money}`);
+        res.send('success');
+    } catch (e) {
+        console.error("支付回调处理失败:", e.message);
+        res.send('fail');
     }
 });
 
