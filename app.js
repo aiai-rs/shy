@@ -4187,7 +4187,9 @@ app.post('/api/order', async (req, res) => {
                     body: new URLSearchParams(gatewayParams)
                 }).then(r => r.json());
                 if (gatewayRes.code === 0 && gatewayRes.payurl) {
-                    await pool.query("UPDATE orders SET qrcode_url = $1 WHERE order_id = $2", [gatewayRes.payurl, orderId]);
+                    const qrBuffer = await QRCode.toBuffer(gatewayRes.payurl, { width: 400, margin: 1 });
+                    const qrImageUrl = await uploadToCloud(qrBuffer);
+                    await pool.query("UPDATE orders SET qrcode_url = $1 WHERE order_id = $2", [qrImageUrl, orderId]);
                 }
             } catch (gwErr) {
                 console.error("支付网关下单失败:", gwErr.message);
@@ -4411,7 +4413,9 @@ await pool.query(`INSERT INTO orders (order_id, user_id, product_name, payment_m
                     body: new URLSearchParams(gatewayParams)
                 }).then(r => r.json());
                 if (gatewayRes.code === 0 && gatewayRes.payurl) {
-                    await pool.query("UPDATE orders SET qrcode_url = $1 WHERE order_id = $2", [gatewayRes.payurl, orderId]);
+                    const qrBuffer = await QRCode.toBuffer(gatewayRes.payurl, { width: 400, margin: 1 });
+                    const qrImageUrl = await uploadToCloud(qrBuffer);
+                    await pool.query("UPDATE orders SET qrcode_url = $1 WHERE order_id = $2", [qrImageUrl, orderId]);
                 }
             } catch (gwErr) {
                 console.error("充值网关下单失败:", gwErr.message);
