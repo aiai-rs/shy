@@ -1927,7 +1927,7 @@ bot.command('scbq', async (ctx) => {
 
 });
 
-    bot.command('用户失联', async (ctx) => {
+    bot.hears('/用户失联', async (ctx) => {
     if (!GROUP_CHAT_IDS.includes(ctx.chat.id)) return;
     if (!await isAdmin(ctx.chat.id, ctx.from.id)) return ctx.reply("❌ 🔒无权限！只限管理员使用。");
 
@@ -1950,7 +1950,7 @@ bot.command('scbq', async (ctx) => {
     }
 });
 
-bot.command('解锁', async (ctx) => {
+bot.hears('/解锁', async (ctx) => {
     if (!GROUP_CHAT_IDS.includes(ctx.chat.id)) return;
     if (!await isAdmin(ctx.chat.id, ctx.from.id)) return ctx.reply("❌ 🔒无权限！只限管理员使用。");
 
@@ -1977,7 +1977,7 @@ bot.command('解锁', async (ctx) => {
     }
 });
 
-bot.command('本群解散清除无关人员', async (ctx) => {
+bot.hears('/本群解散清除无关人员', async (ctx) => {
     if (!GROUP_CHAT_IDS.includes(ctx.chat.id)) return;
     if (!await isAdmin(ctx.chat.id, ctx.from.id)) return ctx.reply("❌ 🔒无权限！只限管理员使用。");
 
