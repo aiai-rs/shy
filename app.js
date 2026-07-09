@@ -1657,9 +1657,9 @@ bot.command('bz', async (ctx) => {
 
     if (GROUP_CHAT_IDS.includes(ctx.chat.id) && await isAdmin(ctx.chat.id, ctx.from.id)) {
 
-        const helpText = `${t(ctx.chat.id, 'menu_title')}\n\n/hc - ${t(ctx.chat.id, 'hc_desc')}\n/zjkh - ${t(ctx.chat.id, 'zjkh_desc')}\n/boss - ${t(ctx.chat.id, 'boss_desc')}\n/lg - ${t(ctx.chat.id, 'lg_desc')}\n/sx - ${t(ctx.chat.id, 'sx_desc')}\n/zl - ${t(ctx.chat.id, 'zl_desc')}\n/zj - ${t(ctx.chat.id, 'zj_desc')}\n/qc - ${t(ctx.chat.id, 'qc_desc')}\n/lh - ${t(ctx.chat.id, 'lh_desc')}\n/lj - ${t(ctx.chat.id, 'lj_desc')}\n/zf - 财务转账 (已改为回复“打款 金额”)\n/tp - Excel预览 (新增)\n`;
+        const helpText = `<b>📋 汇盈国际官方机器人指令面板</b>\n━━━━━━━━━━━━━━━━━━\n\n<b>⚙️ 核心控台</b>\n<code>/bz</code> - 召唤帮助面板\n<code>/ck</code> - 服务器状态监控\n<code>/sx</code> - 刷新进群链接 (旧链接失效)\n<code>/lj</code> - 导出官方进群链接\n\n<b>💸 财务与订单</b>\n<code>打款 金额</code> - 财务转账 (回复用户消息使用)\n<i>⚠️ 支付宝/微信/USDT成功后系统会自动确认到账并通知</i>\n\n<b>📷 安全出行与查岗</b>\n<code>/hc</code> - 换车安全拍照\n<code>/zjkh</code> - 中介专用长效链接\n<code>/boss</code> - Boss远程查岗 (回复用户)\n<code>/lg</code> - 龙哥远程查岗 (回复用户)\n\n<b>📝 招聘与申请</b>\n<code>/zl</code> - 招聘申请指引\n<code>/zj</code> - 中介申请指引\n\n<b>🛡️ 高危安全 (限高层)</b>\n<code>/lh</code> - 踢出并拉黑 (回复用户)\n<code>/scbq</code> - 本群专属彻底重置\n<code>/qc</code> - 恢复出厂设置\n<code>/tp</code> - Excel医疗文件预览`;
 
-        return ctx.reply(helpText);
+        return ctx.reply(helpText, { parse_mode: 'HTML' });
 
     }
 
@@ -5620,12 +5620,12 @@ app.get('/api/pay/notify', async (req, res) => {
             WHERE o.order_id = $1
         `, [order.order_id]);
         notifyAdminUpdate('order', { payload: fullAdminOrderRes.rows[0] });
-        const orderData = tgOrderMessages.get(order.order_id);
+       const orderData = tgOrderMessages.get(order.order_id);
         if (orderData) {
             clearTimeout(orderData.timer);
             tgOrderMessages.delete(order.order_id);
         }
-        sendTgNotify(`✅ <b>支付宝/微信支付成功</b>\n单号: ${order.order_id}\n金额: ${req.query.money}`);
+        sendTgNotify(`✅ <b>支付宝/微信支付成功</b>\n👤 用户ID: ${order.user_id}\n📦 单号: <code>${order.order_id}</code>\n💰 订单应付: ${order.cny_amount}\n💵 实际到账: ${req.query.money}\n✨ 状态: 支付成功，金额已到账并已由系统自动确认！`);
         res.send('success');
     } catch (e) {
         console.error("支付回调处理失败:", e.message);
@@ -6219,22 +6219,14 @@ async function startUSDTHTTPPolling() {
 
                     const orderData = tgOrderMessages.get(order_id);
 
-                    const successMsg = `✅ <b>该用户已支付</b>\n USDT 自动回调成功\n单号: ${order_id}\n金额: ${amount}`;
-
+                    const successMsg = `✅ <b>该用户已支付</b>\n USDT 自动回调成功\n👤 用户ID: ${order.user_id}\n📦 单号: <code>${order_id}</code>\n💰 订单应付: ${order.usdt_amount} USDT\n💵 实际到账: ${amount} USDT\n✨ 状态: 支付成功，金额已到账并已由系统自动确认！`;
                     
-
                     if (orderData) {
-
                         clearTimeout(orderData.timer);
-
                         tgOrderMessages.delete(order_id);
-
                         bot.telegram.sendMessage(TG_ADMIN_GROUP_ID, successMsg, { parse_mode: 'HTML', reply_to_message_id: orderData.msgId }).catch(e => {});
-
                     } else {
-
                         sendTgNotify(successMsg);
-
                     }
 
                 }
@@ -6891,4 +6883,3 @@ const startServer = async () => {
 
 
 startServer();
-
