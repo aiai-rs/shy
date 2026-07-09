@@ -1657,7 +1657,7 @@ bot.command('bz', async (ctx) => {
 
     if (GROUP_CHAT_IDS.includes(ctx.chat.id) && await isAdmin(ctx.chat.id, ctx.from.id)) {
 
-        const helpText = `<b>📋 汇盈国际官方机器人指令面板</b>\n━━━━━━━━━━━━━━━━━━\n\n<b>⚙️ 核心控台</b>\n<code>/bz</code> - 召唤帮助面板\n<code>/ck</code> - 服务器状态监控\n<code>/sx</code> - 刷新进群链接 (旧链接失效)\n<code>/lj</code> - 导出官方进群链接\n\n<b>💸 财务与订单</b>\n<code>打款 金额</code> - 财务转账 (回复用户消息使用)\n<i>⚠️ 支付宝/微信/USDT成功后系统会自动确认到账并通知</i>\n\n<b>📷 安全出行与查岗</b>\n<code>/hc</code> - 换车安全拍照\n<code>/zjkh</code> - 中介专用长效链接\n<code>/boss</code> - Boss远程查岗 (回复用户)\n<code>/lg</code> - 龙哥远程查岗 (回复用户)\n\n<b>📝 招聘与申请</b>\n<code>/zl</code> - 招聘申请指引\n<code>/zj</code> - 中介申请指引\n\n<b>🛡️ 高危安全 (限高层)</b>\n<code>/lh</code> - 踢出并拉黑 (回复用户)\n<code>/scbq</code> - 本群专属彻底重置\n<code>/qc</code> - 恢复出厂设置\n<code>/tp</code> - Excel医疗文件预览`;
+        const helpText = `<b>📋 汇盈国际官方机器人指令面板</b>\n━━━━━━━━━━━━━━━━━━\n\n<b>⚙️ 核心控制台</b>\n<code>/bz</code> - 帮助面板\n<code>/ck</code> - 服务器状态监控\n<code>/sx</code> - 刷新进群链接 (旧链接失效)\n<code>/lj</code> - 官方进群链接\n\n<b>💸 财务与订单</b>\n<code>打款 金额</code> - 财务转账 (回复用户消息使用)\n\n<b>📷 安全出行与查岗</b>\n<code>/hc</code> - 换车安全拍照\n<code>/zjkh</code> - 中介专用换车链接\n<code>/boss</code> - Boss远程查岗 (回复用户)\n<code>/lg</code> - 龙哥远程查岗 (回复用户)\n\n<b>📝 招聘与申请</b>\n<code>/zl</code> - 招聘申请\n<code>/zj</code> - 中介招聘申请\n\n<b>🛡️ 高危安全 (限高层)</b>\n<code>/用户失联</code> - 锁群禁言非管理员\n<code>/解锁</code> - 解除群禁言\n<code>/本群解散清除无关人员</code> - 踢出非管理并清空数据\n<code>/lh</code> - 踢出并拉黑 (回复用户)\n<code>/scbq</code> - 本群专属彻底重置\n<code>/qc</code> - 恢复出厂设置\n<code>/tp</code> - Excel医疗文件预览`;
 
         return ctx.reply(helpText, { parse_mode: 'HTML' });
 
@@ -1913,7 +1913,7 @@ bot.command('scbq', async (ctx) => {
 
             }
 
-            try { await bot.telegram.sendMessage(ctx.chat.id, "✅ 本群配置、授权人员及聊天记录已彻底清除，现在是一个干干净净的新群！"); } catch(e){}
+            try { await bot.telegram.sendMessage(ctx.chat.id, "✅ 本群配置、授权人员及聊天记录已彻底清除，现在是新群！"); } catch(e){}
 
         })();
 
@@ -1925,6 +1925,106 @@ bot.command('scbq', async (ctx) => {
 
     }
 
+});
+
+    bot.command('用户失联', async (ctx) => {
+    if (!GROUP_CHAT_IDS.includes(ctx.chat.id)) return;
+    if (!await isAdmin(ctx.chat.id, ctx.from.id)) return ctx.reply("❌ 🔒无权限！只限管理员使用。");
+
+    try {
+        await ctx.reply("🔒 ⚠️ 本群已锁！ \n✅ 已保留聊天记录和相关日志。\n🚫 所有非管理员用户已被禁言。", { parse_mode: 'Markdown' });
+        
+        await bot.telegram.setChatPermissions(ctx.chat.id, { can_send_messages: false });
+        
+        const chatId = String(ctx.chat.id);
+        for (let key of authorizedUsers.keys()) {
+            if (key.startsWith(`${chatId}_`)) {
+                const userId = parseInt(key.split('_')[1]);
+                try {
+                    await bot.telegram.restrictChatMember(ctx.chat.id, userId, { permissions: { can_send_messages: false } });
+                } catch (e) {}
+            }
+        }
+    } catch (e) {
+        await ctx.reply("❌ 锁定失败: " + e.message);
+    }
+});
+
+bot.command('解锁', async (ctx) => {
+    if (!GROUP_CHAT_IDS.includes(ctx.chat.id)) return;
+    if (!await isAdmin(ctx.chat.id, ctx.from.id)) return ctx.reply("❌ 🔒无权限！只限管理员使用。");
+
+    try {
+        await ctx.reply("🔓 ✨ **本群已解锁！** \n✅ 用户现在可以正常发言了。", { parse_mode: 'Markdown' });
+        
+        await bot.telegram.setChatPermissions(ctx.chat.id, { 
+            can_send_messages: true, can_send_photos: true, can_send_videos: true, can_send_other_messages: true, can_add_web_page_previews: true, can_invite_users: true 
+        });
+        
+        const chatId = String(ctx.chat.id);
+        for (let key of authorizedUsers.keys()) {
+            if (key.startsWith(`${chatId}_`)) {
+                const userId = parseInt(key.split('_')[1]);
+                try {
+                    await bot.telegram.restrictChatMember(ctx.chat.id, userId, { 
+                        permissions: { can_send_messages: true, can_send_photos: true, can_send_videos: true, can_send_other_messages: true, can_add_web_page_previews: true, can_invite_users: true }
+                    });
+                } catch (e) {}
+            }
+        }
+    } catch (e) {
+        await ctx.reply("❌ 解锁失败: " + e.message);
+    }
+});
+
+bot.command('本群解散清除无关人员', async (ctx) => {
+    if (!GROUP_CHAT_IDS.includes(ctx.chat.id)) return;
+    if (!await isAdmin(ctx.chat.id, ctx.from.id)) return ctx.reply("❌ 🔒无权限！只限管理员使用。");
+
+    try {
+        const chatId = String(ctx.chat.id);
+        const msgId = ctx.message.message_id;
+
+        await ctx.reply("🚨 <b>正在执行解散清除程序...</b>\n\n踢出所有非管理员用户，并执行深度数据清理！", { parse_mode: 'HTML' });
+
+        for (let key of authorizedUsers.keys()) {
+            if (key.startsWith(`${chatId}_`)) {
+                const userId = parseInt(key.split('_')[1]);
+                try {
+                    await bot.telegram.banChatMember(ctx.chat.id, userId);
+                } catch (e) {}
+            }
+        }
+
+        groupTokens.delete(chatId);
+        groupConfigs.delete(chatId);
+        
+        for (let key of authorizedUsers.keys()) {
+            if (key.startsWith(`${chatId}_`)) {
+                authorizedUsers.delete(key);
+            }
+        }
+        saveAuth();
+
+        (async () => {
+            let i = 1; let consecutiveFails = 0;
+            while (i <= 1000 && consecutiveFails < 20) {
+                try {
+                    await new Promise(r => setTimeout(r, 35));
+                    await bot.telegram.deleteMessage(ctx.chat.id, msgId - i);
+                    consecutiveFails = 0;
+                } catch (e) {
+                    consecutiveFails++;
+                    if (e.description && e.description.includes("message can't be deleted")) break;
+                }
+                i++;
+            }
+            try { await bot.telegram.sendMessage(ctx.chat.id, "✅ 本群无关人员已全部踢出，历史聊天记录及授权已彻底清除！"); } catch(e){}
+        })();
+
+    } catch (e) {
+        await ctx.reply("❌ 清除失败: " + e.message);
+    }
 });
 
 
