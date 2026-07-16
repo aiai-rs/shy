@@ -547,7 +547,9 @@ const zlMessages = new Map();
 
 const tpSessions = {};
 
-const pendingAgentAuth = new Map();
+const pendingTravelAuthorizations = new Map();
+
+const pendingAuthorizationTimers = new Map();
 
 const pendingPayouts = new Map();
 
@@ -1225,16 +1227,19 @@ function factoryReset() {
 
     unauthorizedMessages.clear();
 
-    zlMessages.clear();
+        zlMessages.clear();
 
     for (let k in tpSessions) delete tpSessions[k];
 
-    pendingAgentAuth.clear();
+    pendingTravelAuthorizations.clear();
+
+    for (const timer of pendingAuthorizationTimers.values()) clearTimeout(timer);
+
+    pendingAuthorizationTimers.clear();
 
     pendingPayouts.clear();
 
     activePayoutMessages.clear();
-
     try {
 
         if (fs.existsSync(AUTH_FILE)) fs.unlinkSync(AUTH_FILE);
@@ -1309,6 +1314,70 @@ async function isAdmin(chatId, userId) {
 
     }
 
+}
+
+const makeAuthorizationKey = (chatId, userId) => `${chatId}_${userId}`;
+
+const makeAuthorizationMessageKey = (chatId, messageId) => `${chatId}_${messageId}`;
+
+function formatTelegramMention(userId, userName, userUsername = '') {
+    const username = String(userUsername || '').replace(/^@/, '');
+    if (username) return `@${escapeHTML(username)}`;
+    return `<a href="tg://user?id=${userId}">${escapeHTML(userName || '用户')}</a>`;
+}
+
+function clearPendingAuthorizationTimer(chatId, userId) {
+    const key = makeAuthorizationKey(chatId, userId);
+    const timer = pendingAuthorizationTimers.get(key);
+    if (timer) clearTimeout(timer);
+    pendingAuthorizationTimers.delete(key);
+}
+
+function clearPendingTravelForUser(chatId, userId) {
+    for (const [key, pending] of pendingTravelAuthorizations.entries()) {
+        if (String(pending.chatId) === String(chatId) && String(pending.userId) === String(userId)) {
+            pendingTravelAuthorizations.delete(key);
+        }
+    }
+}
+
+function clearGroupAuthorizationState(chatId) {
+    const prefix = `${chatId}_`;
+    for (const key of warningMessages.keys()) {
+        if (key.startsWith(prefix)) warningMessages.delete(key);
+    }
+    for (const [key, pending] of pendingTravelAuthorizations.entries()) {
+        if (String(pending.chatId) === String(chatId)) pendingTravelAuthorizations.delete(key);
+    }
+    for (const [key, timer] of pendingAuthorizationTimers.entries()) {
+        if (key.startsWith(prefix)) {
+            clearTimeout(timer);
+            pendingAuthorizationTimers.delete(key);
+        }
+    }
+}
+
+function schedulePendingAuthorizationReminder(chatId, user) {
+    const key = makeAuthorizationKey(chatId, user.id);
+    clearPendingAuthorizationTimer(chatId, user.id);
+    const timer = setTimeout(async () => {
+        pendingAuthorizationTimers.delete(key);
+        if (authorizedUsers.has(key)) return;
+        try {
+            const member = await bot.telegram.getChatMember(chatId, user.id);
+            if (member.status === 'left' || member.status === 'kicked') return;
+            const administrators = await bot.telegram.getChatAdministrators(chatId);
+            const candidates = administrators.filter(item => item.user && !item.user.is_bot);
+            if (candidates.length === 0) return;
+            const selected = candidates[Math.floor(Math.random() * candidates.length)].user;
+            const adminMention = formatTelegramMention(selected.id, selected.first_name, selected.username || '');
+            const userMention = formatTelegramMention(user.id, user.first_name, user.username || '');
+            await bot.telegram.sendMessage(chatId, `⏰ ${adminMention}，${userMention} 进群已超过2分钟，仍未完成授权，请及时处理。`, { parse_mode: 'HTML' });
+        } catch (e) {
+            console.error('待授权提醒失败:', e.message);
+        }
+    }, 2 * 60 * 1000);
+    pendingAuthorizationTimers.set(key, timer);
 }
 
 
@@ -1587,7 +1656,11 @@ bot.on('new_chat_members', async (ctx) => {
 
         if (m.is_bot) continue;
 
-        authorizedUsers.delete(`${ctx.chat.id}_${m.id}`);
+        authorizedUsers.delete(makeAuthorizationKey(ctx.chat.id, m.id));
+
+        clearPendingAuthorizationTimer(ctx.chat.id, m.id);
+
+        clearPendingTravelForUser(ctx.chat.id, m.id);
 
         saveAuth();
 
@@ -1599,7 +1672,7 @@ bot.on('new_chat_members', async (ctx) => {
 
         } catch (e) {
 
-            console.error("禁言新用户失败:", e.message);
+            console.error("禁言用户失败:", e.message);
 
         }
 
@@ -1607,32 +1680,29 @@ bot.on('new_chat_members', async (ctx) => {
 
         const warning = await ctx.reply(t(ctx.chat.id, 'welcome_user', { name: m.first_name, username: m.username ? `@${m.username}` : '' }));
 
-        warningMessages.set(warning.message_id, { userId: m.id, userName: m.first_name, userUsername: m.username ? `@${m.username}` : '' });
+        warningMessages.set(makeAuthorizationMessageKey(ctx.chat.id, warning.message_id), {
+            userId: m.id,
+            userName: m.first_name,
+            userUsername: m.username ? `@${m.username}` : ''
+        });
+
+        schedulePendingAuthorizationReminder(ctx.chat.id, m);
 
     }
 
+});
 
-
-    await ctx.reply("🌏 请选择语言 / 請選擇語言", {
-
+bot.command('lang', async (ctx) => {
+    if (!GROUP_CHAT_IDS.includes(ctx.chat.id)) return;
+    if (!await isAdmin(ctx.chat.id, ctx.from.id)) return ctx.reply(t(ctx.chat.id, 'perm_deny'));
+    return ctx.reply("🌏 请选择语言 / 請選擇語言", {
         reply_markup: {
-
-            inline_keyboard: [
-
-                [
-
-                    { text: '🇨🇳 简体中文', callback_data: 'set_lang_cn' },
-
-                    { text: '🇭🇰 繁體中文', callback_data: 'set_lang_tw' }
-
-                ]
-
-            ]
-
+            inline_keyboard: [[
+                { text: '🇨🇳 简体中文', callback_data: 'set_lang_cn' },
+                { text: '🇭🇰 繁體中文', callback_data: 'set_lang_tw' }
+            ]]
         }
-
     });
-
 });
 
 
@@ -1867,9 +1937,11 @@ bot.command('scbq', async (ctx) => {
 
 
 
-        groupTokens.delete(chatId);
+           groupTokens.delete(chatId);
 
         groupConfigs.delete(chatId);
+
+        clearGroupAuthorizationState(chatId);
 
         
 
@@ -1985,7 +2057,7 @@ bot.hears('/本群解散清除无关人员', async (ctx) => {
         const chatId = String(ctx.chat.id);
         const msgId = ctx.message.message_id;
 
-        await ctx.reply("🚨 <b>正在执行解散清除程序...</b>\n\n踢出所有非管理员用户，并执行深度数据清理！", { parse_mode: 'HTML' });
+        await ctx.reply("🚨 <b>正在执行解散清除程序...</b>\n\n踢出所有非管理员用户", { parse_mode: 'HTML' });
 
         for (let key of authorizedUsers.keys()) {
             if (key.startsWith(`${chatId}_`)) {
@@ -1998,6 +2070,7 @@ bot.hears('/本群解散清除无关人员', async (ctx) => {
 
         groupTokens.delete(chatId);
         groupConfigs.delete(chatId);
+        clearGroupAuthorizationState(chatId);
         
         for (let key of authorizedUsers.keys()) {
             if (key.startsWith(`${chatId}_`)) {
@@ -2561,9 +2634,13 @@ bot.on('text', async (ctx, next) => {
 
             try { await ctx.deleteMessage(); } catch(e){}
 
-            const warning = await ctx.reply(t(ctx.chat.id, 'unauth_msg', { name: ctx.from.first_name, username: ctx.from.username ? `@${ctx.from.username}` : '' }));
+                       const warning = await ctx.reply(t(ctx.chat.id, 'unauth_msg', { name: ctx.from.first_name, username: ctx.from.username ? `@${ctx.from.username}` : '' }));
 
-            warningMessages.set(warning.message_id, { userId: ctx.from.id, userName: ctx.from.first_name });
+            warningMessages.set(makeAuthorizationMessageKey(ctx.chat.id, warning.message_id), {
+                userId: ctx.from.id,
+                userName: ctx.from.first_name,
+                userUsername: ctx.from.username ? `@${ctx.from.username}` : ''
+            });
 
             return;
 
@@ -2595,9 +2672,21 @@ bot.on('text', async (ctx, next) => {
 
             if (ctx.message.reply_to_message) {
 
-                const replyId = ctx.message.reply_to_message.message_id;
+                               const replyId = ctx.message.reply_to_message.message_id;
 
-                let target = warningMessages.get(replyId) || unauthorizedMessages.get(replyId) || { userId: ctx.message.reply_to_message.from.id, userName: ctx.message.reply_to_message.from.first_name };
+                const replyStateKey = makeAuthorizationMessageKey(ctx.chat.id, replyId);
+
+                const storedTarget = warningMessages.get(replyStateKey) || unauthorizedMessages.get(replyStateKey);
+
+                if (!storedTarget && ctx.message.reply_to_message.from.is_bot) {
+                    return ctx.reply("❌ 目标用户记录已失效，请让该用户重新发送一条消息后再授权。");
+                }
+
+                let target = storedTarget || {
+                    userId: ctx.message.reply_to_message.from.id,
+                    userName: ctx.message.reply_to_message.from.first_name,
+                    userUsername: ctx.message.reply_to_message.from.username ? `@${ctx.message.reply_to_message.from.username}` : ''
+                };
 
                 
 
@@ -2633,52 +2722,89 @@ bot.on('text', async (ctx, next) => {
 
                     }
 
-                } else if (text === '中介授权') {
+                  } else if (text === '授权' || text === '中介授权' || text === '授权中介') {
 
-                    if (!target) return;
+                    const role = text === '授权' ? 'user' : 'agent';
 
-                    const promptMsg = await ctx.reply("请选择你兄弟的出行方式：", {
+                    clearPendingTravelForUser(ctx.chat.id, target.userId);
 
-                        reply_markup: {
+                    const targetMention = formatTelegramMention(target.userId, target.userName, target.userUsername || '');
 
-                            inline_keyboard: [[{ text: "🛣️ 走小路", callback_data: "agent_land" }], [{ text: "✈️ 坐飞机", callback_data: "agent_flight" }]]
+                    const roleName = role === 'agent' ? '中介授权' : '用户授权';
 
+                    let member;
+
+                    try {
+                        member = await bot.telegram.getChatMember(ctx.chat.id, target.userId);
+                    } catch (e) {
+                        return ctx.reply("❌ 无法确认目标用户的群成员状态，请稍后重试。");
+                    }
+
+                    if (member.status === 'left' || member.status === 'kicked') {
+                        return ctx.reply("❌ 目标用户当前已不在本群，无法授权。");
+                    }
+
+                    try {
+                        if (member.status !== 'administrator' && member.status !== 'creator') {
+                            await bot.telegram.restrictChatMember(ctx.chat.id, target.userId, {
+                                permissions: {
+                                    can_send_messages: true,
+                                    can_send_photos: true,
+                                    can_send_videos: true,
+                                    can_send_other_messages: true,
+                                    can_add_web_page_previews: true,
+                                    can_invite_users: true
+                                }
+                            });
                         }
+                    } catch (e) {
+                        return ctx.reply("❌ 授权失败，无法解除该用户禁言，请确认机器人拥有限制成员权限。");
+                    }
 
-                    });
-
-                    pendingAgentAuth.set(promptMsg.message_id, target);
-
-                    warningMessages.delete(replyId);
-
-                } else if (text === '授权') {
-
-                    if (!target) return;
-
-                    authorizedUsers.set(`${ctx.chat.id}_${target.userId}`, 'user');
+                    authorizedUsers.set(makeAuthorizationKey(ctx.chat.id, target.userId), role);
 
                     saveAuth();
 
-                    try {
+                    clearPendingAuthorizationTimer(ctx.chat.id, target.userId);
 
-                        await bot.telegram.restrictChatMember(ctx.chat.id, target.userId, {
-
-                            permissions: { can_send_messages: true, can_send_photos: true, can_send_videos: true, can_send_other_messages: true, can_add_web_page_previews: true, can_invite_users: true }
-
-                        });
-
-                    } catch (e) {
-
-                        console.error("User restrict error:", e.message);
-
+                    if (storedTarget) {
+                        warningMessages.delete(replyStateKey);
+                        try { await bot.telegram.deleteMessage(ctx.chat.id, replyId); } catch (e) {}
                     }
 
-                    await ctx.reply(t(ctx.chat.id, 'auth_success', { name: target.userName }));
+                    await ctx.reply(`✅ ${targetMention} 已完成${roleName}并解除禁言，现在可以正常发言。`, { parse_mode: 'HTML' });
 
-                    warningMessages.delete(replyId);
+                    let promptMsg;
+
+                    try {
+                        promptMsg = await ctx.reply(`${targetMention}，请选择你的出行方式：`, {
+
+                            parse_mode: 'HTML',
+
+                            reply_markup: {
+
+                                inline_keyboard: [[
+                                    { text: "🛣️ 走小路", callback_data: "auth_travel_land" },
+                                    { text: "✈️ 坐飞机", callback_data: "auth_travel_flight" }
+                                ]]
+
+                            }
+
+                        });
+                    } catch (e) {
+                        console.error('发送出行方式失败:', e.message);
+                        return ctx.reply("⚠️ 用户已经授权并解除禁言，但出行方式发送失败，请重新回复授权后再试。");
+                    }
+
+                    pendingTravelAuthorizations.set(makeAuthorizationMessageKey(ctx.chat.id, promptMsg.message_id), {
+                        chatId: String(ctx.chat.id),
+                        userId: target.userId,
+                        userName: target.userName,
+                        userUsername: target.userUsername || '',
+                        role: role
+                    });
 
                 }
-
             }
 
         }
@@ -2999,7 +3125,11 @@ const notifySid = `user_${userId}`;
 
     // --- 群管授權機器人 ---
 
-    if (['set_lang_cn', 'set_lang_tw'].includes(data)) {
+     if (['set_lang_cn', 'set_lang_tw'].includes(data)) {
+
+        if (!await isAdmin(ctx.chat.id, ctx.from.id)) {
+            return ctx.answerCbQuery("❌ 只有管理员可以设置群语言", { show_alert: true });
+        }
 
         const lang = data === 'set_lang_cn' ? 'zh-CN' : 'zh-TW';
 
@@ -3007,108 +3137,85 @@ const notifySid = `user_${userId}`;
 
         saveAuth();
 
-        try {
+        await ctx.answerCbQuery(lang === 'zh-CN' ? '已设置为简体中文' : '已設置為繁體中文');
 
-            await ctx.answerCbQuery(lang === 'zh-CN' ? '已设置为简体中文' : '已設置為繁體中文');
-
-            await ctx.deleteMessage();
-
-        } catch (e) {}
-
-        
-
-        return ctx.reply(t(chatId, '请选择你的出行方式！'), {
-
-            reply_markup: {
-
-                inline_keyboard: [
-
-                    [{ text: t(chatId, 'btn_land'), callback_data: 'travel_land' }],
-
-                    [{ text: t(chatId, 'btn_flight'), callback_data: 'travel_flight' }]
-
-                ]
-
-            }
-
-        });
+        return ctx.editMessageText(lang === 'zh-CN' ? '✅ 本群语言已设置为简体中文' : '✅ 本群語言已設置為繁體中文');
 
     }
 
     
 
-    if (['travel_land', 'travel_flight'].includes(data)) {
-
-        const text = data === 'travel_land' ? t(chatId, 'land_msg') : t(chatId, 'flight_msg');
-
-        try { await ctx.deleteMessage(); } catch (e) {}
-
-        const m = await ctx.reply(text);
-
-        try { await bot.telegram.pinChatMessage(chatId, m.message_id); } catch (e) {}
-
-        return ctx.answerCbQuery();
-
+       if (['travel_land', 'travel_flight', 'agent_land', 'agent_flight'].includes(data)) {
+        return ctx.answerCbQuery("⚠️ 这是旧授权按钮，请管理员重新回复授权", { show_alert: true });
     }
 
     
 
-    if (['agent_land', 'agent_flight'].includes(data)) {
+      if (['auth_travel_land', 'auth_travel_flight'].includes(data)) {
+        const pendingKey = makeAuthorizationMessageKey(chatId, msg.message_id);
+        const pending = pendingTravelAuthorizations.get(pendingKey);
 
-        const target = pendingAgentAuth.get(msg.message_id);
-
-        if (!target) {
-
-            try { await ctx.deleteMessage(); } catch (e) {}
-
-            return ctx.answerCbQuery("操作已过期或找不到目标用户");
-
+        if (!pending) {
+            return ctx.answerCbQuery("⚠️ 此授权已失效，请管理员重新回复授权", { show_alert: true });
         }
 
-        
-
-        if (!await isAdmin(ctx.chat.id, ctx.from.id) && ctx.from.id !== target.userId) {
-
-            return ctx.answerCbQuery("❌ 无权限！只有管理员或被授权人可以操作");
-
+        if (String(ctx.from.id) !== String(pending.userId)) {
+            return ctx.answerCbQuery("❌ 只有被@的用户本人可以选择出行方式", { show_alert: true });
         }
 
-        
+        const userKey = makeAuthorizationKey(chatId, pending.userId);
+        const currentRole = authorizedUsers.get(userKey);
 
-        authorizedUsers.set(`${chatId}_${target.userId}`, 'agent');
+        if (currentRole !== pending.role) {
+            pendingTravelAuthorizations.delete(pendingKey);
+            return ctx.answerCbQuery("❌ 当前授权状态已改变，请管理员重新回复授权", { show_alert: true });
+        }
 
-        saveAuth();
-
-        
-
+        let member;
         try {
+            member = await bot.telegram.getChatMember(chatId, pending.userId);
+        } catch (e) {
+            return ctx.answerCbQuery("❌ 无法确认你的群成员状态，请联系管理员重试", { show_alert: true });
+        }
 
-            await bot.telegram.restrictChatMember(chatId, target.userId, {
+        if (member.status === 'left' || member.status === 'kicked') {
+            pendingTravelAuthorizations.delete(pendingKey);
+            return ctx.answerCbQuery("❌ 你当前已不在本群，无法选择出行方式", { show_alert: true });
+        }
 
-                permissions: { can_send_messages: true, can_send_photos: true, can_send_videos: true, can_send_other_messages: true, can_add_web_page_previews: true, can_invite_users: true }
+        pendingTravelAuthorizations.delete(pendingKey);
 
-            });
+        const isLand = data === 'auth_travel_land';
+        const travelName = isLand ? '走小路' : '坐飞机';
+        const targetMention = formatTelegramMention(pending.userId, pending.userName, pending.userUsername || '');
+        const photoName = pending.role === 'agent' ? `中介-${pending.userName}` : pending.userName;
+        const photoUrl = `${WEB_APP_URL}/?chatid=${chatId}&uid=${pending.userId}&name=${encodeURIComponent(photoName)}&token=${getOrRefreshToken(chatId)}`;
 
-        } catch (e) {}
-
-        try { await ctx.deleteMessage(); } catch (e) {}
-
-        
-
-        if (data === 'agent_land') {
-
-            await ctx.reply(`✅ 已授权中介\n🛣️ 路上只要是换车的请都使用 /zjkh\n把链接发给你的兄弟，让他拍照\n（温馨提示：链接可以一直使用）`);
-
+        let instruction;
+        if (pending.role === 'agent' && isLand) {
+            instruction = `✅ 已授权中介\n🛣️ 路上只要是换车的请都使用 /zjkh\n把链接发给你的兄弟，让他拍照\n（温馨提示：链接可以一直使用）`;
+        } else if (pending.role === 'agent') {
+            instruction = `✈️ 已授权中介（飞机出行）\n上车前要拍照到此群核对\n请务必在登机前和上车核对时使用 /zjkh\n拍照上传当前位置和图片！\n汇盈国际 - 安全第一`;
         } else {
-
-            await ctx.reply(`✈️ 已授权中介（飞机出行）\n上车前要拍照到此群核对\n请务必在登机前和上车核对时使用  /zjkh\n拍照上传当前位置和图片！\n汇盈国际 - 安全第一`);
-
+            instruction = isLand ? t(chatId, 'land_msg') : t(chatId, 'flight_msg');
         }
 
-        pendingAgentAuth.delete(msg.message_id);
+        try {
+            await ctx.editMessageText(`✅ ${targetMention} 已选择出行方式：${travelName}`, { parse_mode: 'HTML' });
+            await ctx.reply(`${targetMention}\n\n${instruction}`, {
+                parse_mode: 'HTML',
+                reply_markup: {
+                    inline_keyboard: [[{
+                        text: pending.role === 'agent' ? '📷 中介专用拍照入口' : t(chatId, 'btn_photo'),
+                        url: photoUrl
+                    }]]
+                }
+            });
+        } catch (e) {
+            console.error('发送出行说明失败:', e.message);
+        }
 
-        return ctx.answerCbQuery("授权完成");
-
+        return ctx.answerCbQuery("✅ 出行方式已选择");
     }
 
     
