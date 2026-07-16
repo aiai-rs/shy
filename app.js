@@ -2755,7 +2755,7 @@ bot.on('text', async (ctx, next) => {
                         return ctx.reply("❌ 目标用户当前已不在本群，无法授权。");
                     }
 
-                                        try {
+                                                           try {
                         if (member.status !== 'administrator' && member.status !== 'creator') {
                             await bot.telegram.restrictChatMember(ctx.chat.id, target.userId, {
                                 use_independent_chat_permissions: true,
@@ -2770,13 +2770,21 @@ bot.on('text', async (ctx, next) => {
                                     can_send_polls: true,
                                     can_send_other_messages: true,
                                     can_add_web_page_previews: true,
-                                    can_invite_users: true
+                                    can_change_info: true,
+                                    can_invite_users: true,
+                                    can_pin_messages: true,
+                                    can_manage_topics: true
                                 }
                             });
+
+                            const updatedMember = await bot.telegram.getChatMember(ctx.chat.id, target.userId);
+                            if (updatedMember.status === 'restricted' && updatedMember.can_send_messages !== true) {
+                                throw new Error('Telegram 未实际恢复该用户的发言权限');
+                            }
                         }
                     } catch (e) {
                         console.error("解除用户禁言失败:", e.message);
-                        return ctx.reply("❌ 授权失败，无法解除该用户禁言，请确认机器人拥有封禁用户或管理成员权限。");
+                        return ctx.reply(`❌ 授权失败，Telegram 未能解除该用户禁言。\n错误：${escapeHTML(e.message)}`, { parse_mode: 'HTML' });
                     }
 
                     authorizedUsers.set(makeAuthorizationKey(ctx.chat.id, target.userId), role);
