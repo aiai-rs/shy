@@ -2730,7 +2730,18 @@ bot.on('text', async (ctx, next) => {
 
                     const targetMention = formatTelegramMention(target.userId, target.userName, target.userUsername || '');
 
-                    const roleName = role === 'agent' ? '中介授权' : '用户授权';
+                    const roleName = role === 'agent' ? '中介' : '用户';
+
+                    const authorizerMention = formatTelegramMention(ctx.from.id, ctx.from.first_name, ctx.from.username || '');
+
+                    const authorizationTime = new Date().toLocaleString('zh-CN', {
+                        timeZone: 'Asia/Shanghai',
+                        hour12: false
+                    });
+
+                    const travelReminder = role === 'agent'
+                        ? `\n\n📸 <b>出行拍照提醒</b>\n路上换车、上机和下机时，请使用 /zjkh 获取拍照链接。\n请把链接发给你的兄弟，并让他按要求完成拍照。`
+                                               : '';
 
                     let member;
 
@@ -2767,17 +2778,16 @@ bot.on('text', async (ctx, next) => {
 
                     clearPendingAuthorizationTimer(ctx.chat.id, target.userId);
 
-                    if (storedTarget) {
+                                      if (storedTarget) {
                         warningMessages.delete(replyStateKey);
-                        try { await bot.telegram.deleteMessage(ctx.chat.id, replyId); } catch (e) {}
                     }
 
-                    await ctx.reply(`✅ ${targetMention} 已完成${roleName}并解除禁言，现在可以正常发言。`, { parse_mode: 'HTML' });
+                    await ctx.reply(`✅ ${targetMention} <b>已完成授权</b>\n━━━━━━━━━━━━━━\n\n🪪 当前身份：<b>${roleName}</b>\n🛡️ 授权人：${authorizerMention}\n🕒 授权时间：<code>${authorizationTime}</code>\n\n🔓 禁言已解除，现在你可以正常发言。${travelReminder}\n\n🚀 <b>汇盈国际 · 专业 · 安全 · 可靠</b>`, { parse_mode: 'HTML' });
 
                     let promptMsg;
 
                     try {
-                        promptMsg = await ctx.reply(`${targetMention}，请选择你的出行方式：`, {
+                          promptMsg = await ctx.reply(`<b>🚦 ${role === 'agent' ? '请选择你兄弟的出行方式' : '请选择你的出行方式'}</b>\n\n👤 ${targetMention}\n请点击下方按钮完成选择：`, {
 
                             parse_mode: 'HTML',
 
@@ -3187,21 +3197,28 @@ const notifySid = `user_${userId}`;
 
         const isLand = data === 'auth_travel_land';
         const travelName = isLand ? '走小路' : '坐飞机';
+        const identityName = pending.role === 'agent' ? '中介' : '用户';
+        const travelSubject = pending.role === 'agent' ? '兄弟出行方式' : '本人出行方式';
+        const travelIcon = isLand ? '🛣️' : '✈️';
+        const travelTime = new Date().toLocaleString('zh-CN', {
+            timeZone: 'Asia/Shanghai',
+            hour12: false
+        });
         const targetMention = formatTelegramMention(pending.userId, pending.userName, pending.userUsername || '');
         const photoName = pending.role === 'agent' ? `中介-${pending.userName}` : pending.userName;
         const photoUrl = `${WEB_APP_URL}/?chatid=${chatId}&uid=${pending.userId}&name=${encodeURIComponent(photoName)}&token=${getOrRefreshToken(chatId)}`;
 
         let instruction;
         if (pending.role === 'agent' && isLand) {
-            instruction = `✅ 已授权中介\n🛣️ 路上只要是换车的请都使用 /zjkh\n把链接发给你的兄弟，让他拍照\n（温馨提示：链接可以一直使用）`;
+            instruction = `<b>📸 中介拍照提醒</b>\n\n🛣️ 路上每次换车前，请使用 /zjkh 获取拍照链接。\n🔗 把链接发给你的兄弟，让他按要求完成拍照。\n💡 链接可以重复使用。`;
         } else if (pending.role === 'agent') {
-            instruction = `✈️ 已授权中介（飞机出行）\n上车前要拍照到此群核对\n请务必在登机前和上车核对时使用 /zjkh\n拍照上传当前位置和图片！\n汇盈国际 - 安全第一`;
+            instruction = `<b>📸 中介拍照提醒</b>\n\n✈️ 路上换车、上机和下机时，请使用 /zjkh 获取拍照链接。\n🔗 把链接发给你的兄弟，让他上传当前位置和现场照片。\n🛡️ 汇盈国际 · 安全第一`;
         } else {
             instruction = isLand ? t(chatId, 'land_msg') : t(chatId, 'flight_msg');
         }
 
         try {
-            await ctx.editMessageText(`✅ ${targetMention} 已选择出行方式：${travelName}`, { parse_mode: 'HTML' });
+            await ctx.editMessageText(`<b>✅ 出行方式已确认</b>\n━━━━━━━━━━━━━━\n\n👤 ${identityName}：${targetMention}\n${travelIcon} ${travelSubject}：<b>${travelName}</b>\n🕒 选择时间：<code>${travelTime}</code>\n\n📌 请按照下方提示完成拍照。`, { parse_mode: 'HTML' });
             await ctx.reply(`${targetMention}\n\n${instruction}`, {
                 parse_mode: 'HTML',
                 reply_markup: {
