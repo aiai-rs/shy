@@ -269,8 +269,8 @@ const TEXTS = {
         user_auth_msg: "✅ 已授權用戶 ${name}！(只能用 /hc)"
     }
 };
-const ZL_LINKS = { '租车': 'https://che88.netlify.app', '大飞': 'https://fei88.netlify.app', '走药': 'https://yao88.netlify.app', '背债': 'https://bei88.netlify.app' };
-const ZJ_LINKS = { '租车': 'https://zjc88.netlify.app', '大飞': 'https://zjf88.netlify.app', '走药': 'https://zjy88.netlify.app', '背债': 'https://zjb88.netlify.app' };
+const ZL_LINKS = { '租车': 'https://hy88.netlify.app', '大飞': 'https://hy88.netlify.app', '走药': 'https://hy88.netlify.app', '背债': 'https://hy88.netlify.app' };
+const ZJ_LINKS = { '租车': 'https://zj88.netlify.app', '大飞': 'https://zj88.netlify.app', '走药': 'https://zj88.netlify.app', '背债': 'https://zj88.netlify.app' };
 // Express 基础中间件
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, message: { success: false, msg: "尝试次数过多，请15分钟后再试" }, standardHeaders: true, legacyHeaders: false });
 const apiLimiter = rateLimit({ windowMs: 1 * 60 * 1000, max: 200, standardHeaders: true, legacyHeaders: false });
