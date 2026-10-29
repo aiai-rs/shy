@@ -2383,9 +2383,11 @@ app.get('/api/user/team', userAuth, async (req, res) => {
 app.post('/api/user/register', registerLimiter, async (req, res) => {
     const { contact, password, inviteCode, source } = req.body;
     try {
-        if (typeof contact !== 'string' || contact.trim().length < 3 || contact.trim().length > 120) return res.status(400).json({ success: false, msg: '联系方式格式不正确' });
+        const account = typeof contact === 'string' ? contact.trim() : '';
+        if (!account) return res.status(400).json({ success: false, msg: '请输入账号' });
+        if (account.length > 120) return res.status(400).json({ success: false, msg: '账号长度不能超过120个字符' });
         if (typeof password !== 'string' || password.length < 6 || password.length > 128) return res.status(400).json({ success: false, msg: '密码长度需为6至128位' });
-        if ((await pool.query('SELECT id FROM users WHERE contact = $1', [contact])).rows.length > 0) return res.status(409).json({ success: false, msg: '用户已存在' });
+        if ((await pool.query('SELECT id FROM users WHERE contact = $1', [account])).rows.length > 0) return res.status(409).json({ success: false, msg: '用户已存在' });
         let id = null;
         for (let attempt = 0; attempt < 10 && id === null; attempt++) {
             const candidate = crypto.randomInt(100000000, 1000000000);
@@ -2401,7 +2403,7 @@ app.post('/api/user/register', registerLimiter, async (req, res) => {
             const inviterRes = await pool.query('SELECT id FROM users WHERE invite_code = $1', [inviteCode.toUpperCase().trim()]);
             if (inviterRes.rows.length > 0) inviterId = inviterRes.rows[0].id;
         }
-        await pool.query('INSERT INTO users (id, contact, password, balance, invite_code, invited_by, source) VALUES ($1, $2, $3, 0, $4, $5, $6)', [id, contact, hashedPassword, myInviteCode, inviterId, getSiteOwner(source).domain]);
+        await pool.query('INSERT INTO users (id, contact, password, balance, invite_code, invited_by, source) VALUES ($1, $2, $3, 0, $4, $5, $6)', [id, account, hashedPassword, myInviteCode, inviterId, getSiteOwner(source).domain]);
         const newUserRes = await pool.query('SELECT *, false as has_order FROM users WHERE id = $1', [id]);
         notifyAdminUpdate('user_add', { payload: newUserRes.rows[0] });
         res.json({ success: true, isNew: true, userId: id, uid: id, balance: 0, inviteCode: myInviteCode, token: sessionToken });
