@@ -109,12 +109,15 @@ process.on('warning', (warning) => {
 // ==========================================
 const app = express();
 app.set('trust proxy', 1);
+app.disable('x-powered-by');
 const server = http.createServer(app);
 const allowedOrigins = [
     'https://xaw888.com',
     'https://www.xaw888.com',
     'https://xaw8888.com',
     'https://www.xaw8888.com',
+    'https://xaw88.com',
+    'https://www.xaw88.com',
     'https://spht.netlify.app',
     'https://hy88.pro',
     'https://huiying8.netlify.app',
@@ -122,9 +125,37 @@ const allowedOrigins = [
     'http://127.0.0.1:5500',
     'http://localhost:5500'
 ];
+const SITE_OWNERS = Object.freeze([
+    { key: 'longge', domain: 'xaw8888.com', bossName: '龍哥', telegramUsername: 'iibb8' },
+    {
+        key: 'haoge',
+        domain: 'xaw88.com',
+        bossName: '豪哥',
+        // Render 环境变量只填写用户名，不要包含 @；未配置时仍会发到管理群，但不会错误 @ 其他老板。
+        telegramUsername: String(process.env.HAOGE_TELEGRAM_USERNAME || '').trim().replace(/^@/, '')
+    },
+    { key: 'boss', domain: 'xaw888.com', bossName: 'Boss', telegramUsername: 'rrii8' }
+]);
+function normalizeSourceHost(value) {
+    let host = String(value || '').trim().toLowerCase();
+    try {
+        if (/^https?:\/\//i.test(host)) host = new URL(host).hostname;
+    } catch (e) {
+        return '';
+    }
+    return host.replace(/:\d+$/, '').replace(/\.+$/, '');
+}
+function getSiteOwner(value) {
+    const host = normalizeSourceHost(value);
+    return SITE_OWNERS.find(site => host === site.domain || host.endsWith(`.${site.domain}`))
+        || SITE_OWNERS.find(site => site.key === 'boss');
+}
+function getSiteMention(site) {
+    return site.telegramUsername ? `@${site.telegramUsername}` : '';
+}
 const io = new Server(server, {
     cors: { origin: allowedOrigins, methods: ["GET", "POST"], credentials: true },
-    maxHttpBufferSize: 1e8,
+    maxHttpBufferSize: 2 * 1024 * 1024,
     transports: ['websocket'],
     pingTimeout: 10000,
     pingInterval: 5000
@@ -273,7 +304,9 @@ const ZL_LINKS = { '租车': 'https://hy88.netlify.app', '大飞': 'https://hy88
 const ZJ_LINKS = { '租车': 'https://zj88.netlify.app', '大飞': 'https://zj88.netlify.app', '走药': 'https://zj88.netlify.app', '背债': 'https://zj88.netlify.app' };
 // Express 基础中间件
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, message: { success: false, msg: "尝试次数过多，请15分钟后再试" }, standardHeaders: true, legacyHeaders: false });
+const registerLimiter = rateLimit({ windowMs: 60 * 60 * 1000, max: 10, message: { success: false, msg: "注册过于频繁，请稍后再试" }, standardHeaders: true, legacyHeaders: false });
 const apiLimiter = rateLimit({ windowMs: 1 * 60 * 1000, max: 200, standardHeaders: true, legacyHeaders: false });
+const rawUploadLimiter = rateLimit({ windowMs: 10 * 60 * 1000, max: 20, message: { code: 1, msg: '上传过于频繁，请稍后再试' }, standardHeaders: true, legacyHeaders: false });
 app.use(cors({
     origin: function (origin, callback) {
         if (!origin) return callback(null, true);
@@ -282,20 +315,55 @@ app.use(cors({
     },
     credentials: true
 }));
+app.use('/api/', apiLimiter);
+app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(self)');
+    if (req.secure || req.headers['x-forwarded-proto'] === 'https') {
+        res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
+    next();
+});
 app.use((req, res, next) => {
     const start = Date.now();
     res.on('finish', () => {
         const duration = Date.now() - start;
-        console.log(`${new Date().toLocaleString()} | ${req.method} ${req.url} | Status: ${res.statusCode} | ${duration}ms`);
+        // 只记录路径，避免支付签名、拍照链接 token 等查询参数进入日志。
+        console.log(`${new Date().toLocaleString()} | ${req.method} ${req.path} | Status: ${res.statusCode} | ${duration}ms`);
     });
     next();
 });
-app.use(bodyParser.json({ limit: '50mb' }));
-app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
-app.use(express.raw({ type: 'application/octet-stream', limit: '10mb' }));
+app.use(bodyParser.json({ limit: '1mb' }));
+app.use(bodyParser.urlencoded({ limit: '1mb', extended: true }));
+app.use(express.raw({ type: 'application/octet-stream', limit: '3mb' }));
 app.use(express.static('public'));
 if (!fs.existsSync('uploads')) fs.mkdirSync('uploads');
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 3 * 1024 * 1024 } });
+const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 3 * 1024 * 1024, files: 1 },
+    fileFilter: (req, file, callback) => {
+        const allowedTypes = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
+        callback(allowedTypes.has(file.mimetype) ? null : new Error('仅支持 JPG、PNG、WEBP 或 GIF 图片'), allowedTypes.has(file.mimetype));
+    }
+});
+function isAllowedImageBuffer(value) {
+    if (!Buffer.isBuffer(value) || value.length < 12) return false;
+    const isJpeg = value[0] === 0xff && value[1] === 0xd8 && value[2] === 0xff;
+    const isPng = value.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    const header6 = value.subarray(0, 6).toString('ascii');
+    const isGif = header6 === 'GIF87a' || header6 === 'GIF89a';
+    const isWebp = value.subarray(0, 4).toString('ascii') === 'RIFF'
+        && value.subarray(8, 12).toString('ascii') === 'WEBP';
+    return isJpeg || isPng || isGif || isWebp;
+}
+function validateUploadedImage(req, res, next) {
+    if (req.file && !isAllowedImageBuffer(req.file.buffer)) {
+        return res.status(415).json({ success: false, msg: '图片内容与文件类型不匹配' });
+    }
+    next();
+}
 // ==========================================
 // [2] 内存状态
 // ==========================================
@@ -369,6 +437,7 @@ const initDB = async () => {
                 tracking_number TEXT,
                 qrcode_url TEXT,
                 proof TEXT,
+                payment_tx_id TEXT,
                 wallet TEXT,
                 source TEXT,
                 image_url TEXT,
@@ -385,6 +454,8 @@ const initDB = async () => {
             await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS source TEXT");
             await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS variant_name TEXT");
             await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS balance_deducted NUMERIC(10, 4) DEFAULT 0");
+            await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_tx_id TEXT");
+            await client.query("CREATE UNIQUE INDEX IF NOT EXISTS orders_payment_tx_id_unique ON orders (payment_tx_id) WHERE payment_tx_id IS NOT NULL");
             await client.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS source TEXT");
         } catch (e) {
             console.error("扩展订单字段失败:", e.message);
@@ -563,34 +634,35 @@ const logBalance = async (client, userId, type, amount, remark) => {
     notifyAdminUpdate('funds', { payload: logData });
     notifyAdminUpdate('user_balance', { payload: { userId, balance: currentBal } });
 };
+async function applyReferralBonus(client, userId, amount, type) {
+    const uRes = await client.query("SELECT invited_by FROM users WHERE id = $1", [userId]);
+    const inviterId = uRes.rows[0]?.invited_by;
+    if (!inviterId) return;
+    const bonus = Number(amount) * 0.05;
+    if (!Number.isFinite(bonus) || bonus <= 0) return;
+    await client.query("UPDATE users SET balance = balance + $1 WHERE id = $2", [bonus, inviterId]);
+    await logBalance(client, inviterId, '佣金返利', bonus, `好友 ${userId} ${type} ${amount} USDT`);
+    const notifySid = `user_${inviterId}`;
+    const content = `💰 恭喜！您的好友完成了${type} (${amount} USDT)，您获得 ${bonus.toFixed(4)} USDT 返利！`;
+    const msgRes = await client.query(
+        "INSERT INTO chats (session_id, sender, content, msg_type) VALUES ($1, 'admin', $2, 'text') RETURNING created_at",
+        [notifySid, content]
+    );
+    io.to(notifySid).emit('new_message', {
+        session_id: notifySid,
+        sender: 'admin',
+        content,
+        msg_type: 'text',
+        created_at: msgRes.rows[0].created_at
+    });
+    const bonusBalanceRes = await client.query("SELECT balance FROM users WHERE id = $1", [inviterId]);
+    io.to(notifySid).emit('order_update', { balance: bonusBalanceRes.rows[0].balance });
+}
 async function handleReferralBonus(userId, amount, type) {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
-        const uRes = await client.query("SELECT invited_by FROM users WHERE id = $1", [userId]);
-        const inviterId = uRes.rows[0]?.invited_by;
-        if (inviterId) {
-            const bonus = amount * 0.05;
-            if (bonus > 0) {
-                await client.query("UPDATE users SET balance = balance + $1 WHERE id = $2", [bonus, inviterId]);
-                await logBalance(client, inviterId, '佣金返利', bonus, `好友 ${userId} ${type} ${amount} USDT`);
-                const notifySid = `user_${inviterId}`;
-                const content = `💰 恭喜！您的好友完成了${type} (${amount} USDT)，您获得 ${bonus.toFixed(4)} USDT 返利！`;
-                const msgRes = await client.query(
-                    "INSERT INTO chats (session_id, sender, content, msg_type) VALUES ($1, 'admin', $2, 'text') RETURNING created_at",
-                    [notifySid, content]
-                );
-                io.to(notifySid).emit('new_message', {
-                    session_id: notifySid,
-                    sender: 'admin',
-                    content: content,
-                   msg_type: 'text',
-                    created_at: msgRes.rows[0].created_at
-                });
-                const bonusBalanceRes = await client.query("SELECT balance FROM users WHERE id = $1", [inviterId]);
-                io.to(notifySid).emit('order_update', { balance: bonusBalanceRes.rows[0].balance });
-            }
-        }
+        await applyReferralBonus(client, userId, amount, type);
         await client.query('COMMIT');
     } catch (e) {
         await client.query('ROLLBACK');
@@ -961,6 +1033,7 @@ bot.command('bz', async (ctx) => {
 bot.command('ck', async (ctx) => {
     const chatId = String(ctx.chat.id);
     if (chatId === ALLOWED_GROUP_ID) {
+        if (!await isAdmin(ctx.chat.id, ctx.from.id)) return ctx.reply("❌ 只有群管理员可以查看服务器状态");
         try {
             const userCount = await prisma.user.count();
             const msgCount = await prisma.message.count();
@@ -1028,15 +1101,8 @@ bot.command('ck', async (ctx) => {
 });
 bot.command('zc', async (ctx) => {
     if (String(ctx.chat.id) !== ALLOWED_GROUP_ID) return;
-    const password = ctx.message.text.split(/\s+/)[1];
-    if (!password) return ctx.reply("❌ 用法: /zc 新密码");
-    try {
-        await pool.query('INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2', ['admin_password', password]);
-        io.emit('force_admin_relogin');
-        ctx.reply(`✅ 管理员密码已更新为: \`${password}\``, { parse_mode: 'Markdown' });
-    } catch (e) {
-        ctx.reply("❌ 修改失败: " + e.message);
-    }
+    if (!await isAdmin(ctx.chat.id, ctx.from.id)) return ctx.reply("❌ 只有群管理员可以执行此命令");
+    return ctx.reply("🔐 为防止群消息泄露后台密钥，/zc 已停用。请在 Render 环境变量中更新 ADMIN_TOKEN，然后重启服务；不要把新密钥发送到群里。");
 });
 bot.command('scbq', async (ctx) => {
     if (!GROUP_CHAT_IDS.includes(ctx.chat.id)) return;
@@ -1226,6 +1292,7 @@ bot.hears('/本群解散清除无关人员', async (ctx) => {
 bot.command('qc', async (ctx) => {
     const chatId = String(ctx.chat.id);
     if (chatId === TG_ADMIN_GROUP_ID) {
+        if (!await isAdmin(ctx.chat.id, ctx.from.id)) return ctx.reply("❌ 只有群管理员可以执行此操作");
         return ctx.reply("⚠️ <b>高危操作：请选择清理模式</b>", {
             parse_mode: 'HTML',
             reply_markup: {
@@ -1630,6 +1697,17 @@ bot.on('callback_query', async (ctx) => {
     const data = ctx.callbackQuery.data;
     const msg = ctx.callbackQuery.message;
     const chatId = String(msg.chat.id);
+    const adminOnlyCallback =
+        data.startsWith('del_') ||
+        data.startsWith('wd_') ||
+        data.startsWith('pay_') ||
+        data.startsWith('cancel_pay_') ||
+        data.startsWith('tp_') ||
+        data.startsWith('qc_') ||
+        ['confirm_clear_all', 'reject_pay_btn', 'set_lang_cn', 'set_lang_tw'].includes(data);
+    if (adminOnlyCallback && !await isAdmin(msg.chat.id, ctx.from.id)) {
+        return ctx.answerCbQuery('❌ 只有群管理员可以执行此操作', { show_alert: true });
+    }
     // --- 客服聊天機器人 ---
     if (data.startsWith('del_')) {
         const targetId = data.replace('del_', '');
@@ -1678,8 +1756,9 @@ bot.on('callback_query', async (ctx) => {
     if (data.startsWith('wd_confirm_')) {
         const parts = data.split('_');
         const wdId = parts[2];
-        const userId = parts[3];
-        await pool.query("UPDATE withdrawals SET status = '已完成' WHERE id = $1", [wdId]);
+        const updated = await pool.query("UPDATE withdrawals SET status = '已完成' WHERE id = $1 AND status = '处理中' RETURNING user_id", [wdId]);
+        if (updated.rows.length === 0) return ctx.answerCbQuery('该提现已处理，请勿重复操作', { show_alert: true });
+        const userId = String(updated.rows[0].user_id);
         const notifySid = `user_${userId}`;
         const content = '✅ 您的提现已处理，请查收。';
         const resDb = await pool.query("INSERT INTO chats (session_id, sender, content, msg_type) VALUES ($1, 'admin', $2, 'text') RETURNING created_at", [notifySid, content]);
@@ -1691,11 +1770,28 @@ bot.on('callback_query', async (ctx) => {
     if (data.startsWith('wd_reject_')) {
         const parts = data.split('_');
         const wdId = parts[2];
-        const userId = parts[3];
-        const amount = parseFloat(parts[4]);
-        await pool.query("UPDATE withdrawals SET status = '已驳回' WHERE id = $1", [wdId]);
-        await pool.query("UPDATE users SET balance = balance + $1 WHERE id = $2", [amount, userId]);
-        await logBalance(pool, userId, '提现退回', amount, `提现申请(ID:${wdId})被驳回`);
+        const client = await pool.connect();
+        let userId;
+        let amount;
+        try {
+            await client.query('BEGIN');
+            const withdrawal = (await client.query("SELECT user_id, amount, status FROM withdrawals WHERE id = $1 FOR UPDATE", [wdId])).rows[0];
+            if (!withdrawal || withdrawal.status !== '处理中') {
+                await client.query('ROLLBACK');
+                return ctx.answerCbQuery('该提现已处理，请勿重复操作', { show_alert: true });
+            }
+            userId = String(withdrawal.user_id);
+            amount = parseFloat(withdrawal.amount);
+            await client.query("UPDATE withdrawals SET status = '已驳回' WHERE id = $1", [wdId]);
+            await client.query("UPDATE users SET balance = balance + $1 WHERE id = $2", [amount, userId]);
+            await logBalance(client, userId, '提现退回', amount, `提现申请(ID:${wdId})被驳回`);
+            await client.query('COMMIT');
+        } catch (error) {
+            try { await client.query('ROLLBACK'); } catch (rollbackError) {}
+            throw error;
+        } finally {
+            client.release();
+        }
         const notifySid = `user_${userId}`;
         const content = '❌ 您的提现已被驳回，资金已退回余额。';
         const resDb = await pool.query("INSERT INTO chats (session_id, sender, content, msg_type) VALUES ($1, 'admin', $2, 'text') RETURNING created_at", [notifySid, content]);
@@ -1707,16 +1803,32 @@ bot.on('callback_query', async (ctx) => {
     if (data.startsWith('pay_confirm_')) {
         const parts = data.split('_');
         const orderId = parts[2];
-        const userId = parts[3];
-        const orderRes = await pool.query("SELECT * FROM orders WHERE order_id = $1", [orderId]);
-        const order = orderRes.rows[0];
-        if (order && order.status !== '已支付') {
-            await pool.query("UPDATE orders SET status = '已支付' WHERE order_id = $1", [orderId]);
-            if (order.product_name === '余额充值') {
-                await pool.query("UPDATE users SET balance = balance + $1 WHERE id = $2", [parseFloat(order.usdt_amount), userId]);
-            } else {
-                try { await handleReferralBonus(userId, parseFloat(order.usdt_amount), '消费'); } catch (e) { console.error(e); }
+        const client = await pool.connect();
+        let order;
+        let userId;
+        try {
+            await client.query('BEGIN');
+            order = (await client.query("SELECT * FROM orders WHERE order_id = $1 FOR UPDATE", [orderId])).rows[0];
+            if (!order || order.status !== '待审核' || String(order.payment_method).toLowerCase() !== 'usdt') {
+                await client.query('ROLLBACK');
+                return ctx.answerCbQuery('该订单不是待审核的 USDT 订单，无法重复确认', { show_alert: true });
             }
+            userId = String(order.user_id);
+            await client.query("UPDATE orders SET status = '已支付' WHERE order_id = $1", [orderId]);
+            if (order.product_name === '余额充值') {
+                const rechargeAmount = parseFloat(order.usdt_amount);
+                await client.query("UPDATE users SET balance = balance + $1 WHERE id = $2", [rechargeAmount, userId]);
+                await logBalance(client, userId, '余额充值', rechargeAmount, `USDT 订单 ${orderId} 人工审核到账`);
+            } else {
+                await applyReferralBonus(client, userId, parseFloat(order.usdt_amount), '消费');
+            }
+            await client.query('COMMIT');
+        } catch (error) {
+            try { await client.query('ROLLBACK'); } catch (rollbackError) {}
+            throw error;
+        } finally {
+            client.release();
+        }
 const notifySid = `user_${userId}`;
             const content = '✅ 您的支付已确认，订单正在处理中。';
             const resDb = await pool.query("INSERT INTO chats (session_id, sender, content, msg_type) VALUES ($1, 'admin', $2, 'text') RETURNING created_at", [notifySid, content]);
@@ -1725,13 +1837,13 @@ const notifySid = `user_${userId}`;
             const updatedBalanceRes = await pool.query("SELECT balance FROM users WHERE id = $1", [userId]);
             io.to(notifySid).emit('order_update', { order: updatedOrderRes.rows[0], balance: updatedBalanceRes.rows[0].balance });
             return ctx.editMessageCaption(msg.caption ? msg.caption + "\n\n✅ <b>已确认收款</b>" : "✅ <b>已确认收款</b>", { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } });
-        }
     }
     if (data.startsWith('pay_reject_')) {
         const parts = data.split('_');
         const orderId = parts[2];
-        const userId = parts[3];
-        await pool.query("UPDATE orders SET status = '待支付', proof = NULL WHERE order_id = $1", [orderId]);
+        const rejected = await pool.query("UPDATE orders SET status = '待支付', proof = NULL WHERE order_id = $1 AND status = '待审核' AND LOWER(payment_method) = 'usdt' RETURNING user_id", [orderId]);
+        if (rejected.rows.length === 0) return ctx.answerCbQuery('该订单已处理或不是 USDT 待审核订单', { show_alert: true });
+        const userId = String(rejected.rows[0].user_id);
         const notifySid = `user_${userId}`;
         const rejectMsg = `❌ 订单 ${orderId} 支付核实失败。\n原因：客服反应这笔款项未收到,请稍等客服稍后会于你联系。\n订单状态已重置，请核对后重新上传凭证。`;
         const resDb = await pool.query("INSERT INTO chats (session_id, sender, content, msg_type) VALUES ($1, 'admin', $2, 'text') RETURNING created_at", [notifySid, rejectMsg]);
@@ -1954,18 +2066,89 @@ const notifySid = `user_${userId}`;
 // ==========================================
 // [6] Express API 接口整合
 // ==========================================
+const USER_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
+const ADMIN_SESSION_TTL_SECONDS = 8 * 60 * 60;
+const USER_SESSION_SECRET = process.env.USER_SESSION_SECRET || ADMIN_TOKEN;
+function safeTokenEqual(left, right) {
+    const leftBuffer = Buffer.from(String(left || ''));
+    const rightBuffer = Buffer.from(String(right || ''));
+    return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+function createUserSessionToken(userId) {
+    if (!USER_SESSION_SECRET) throw new Error('USER_SESSION_SECRET 未配置');
+    const payload = Buffer.from(JSON.stringify({
+        sub: String(userId),
+        exp: Math.floor(Date.now() / 1000) + USER_SESSION_TTL_SECONDS
+    })).toString('base64url');
+    const signature = crypto.createHmac('sha256', USER_SESSION_SECRET).update(payload).digest('base64url');
+    return `${payload}.${signature}`;
+}
+function verifyUserSessionToken(token) {
+    if (!USER_SESSION_SECRET || typeof token !== 'string') return null;
+    const [payload, signature, extra] = token.split('.');
+    if (!payload || !signature || extra) return null;
+    const expected = crypto.createHmac('sha256', USER_SESSION_SECRET).update(payload).digest('base64url');
+    if (!safeTokenEqual(signature, expected)) return null;
+    try {
+        const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+        if (!decoded.sub || !decoded.exp || decoded.exp <= Math.floor(Date.now() / 1000)) return null;
+        return String(decoded.sub);
+    } catch (e) {
+        return null;
+    }
+}
+function createAdminSessionToken() {
+    if (!ADMIN_TOKEN) throw new Error('ADMIN_TOKEN 未配置');
+    const payload = Buffer.from(JSON.stringify({
+        role: 'admin',
+        exp: Math.floor(Date.now() / 1000) + ADMIN_SESSION_TTL_SECONDS
+    })).toString('base64url');
+    const signature = crypto.createHmac('sha256', ADMIN_TOKEN).update(payload).digest('base64url');
+    return `${payload}.${signature}`;
+}
+function verifyAdminSessionToken(token) {
+    if (!ADMIN_TOKEN || typeof token !== 'string') return false;
+    const [payload, signature, extra] = token.split('.');
+    if (!payload || !signature || extra) return false;
+    const expected = crypto.createHmac('sha256', ADMIN_TOKEN).update(payload).digest('base64url');
+    if (!safeTokenEqual(signature, expected)) return false;
+    try {
+        const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+        return decoded.role === 'admin' && decoded.exp > Math.floor(Date.now() / 1000);
+    } catch (e) {
+        return false;
+    }
+}
+const userAuth = async (req, res, next) => {
+    const authHeader = String(req.headers.authorization || '');
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    const userId = verifyUserSessionToken(token);
+    if (!userId) return res.status(401).json({ success: false, msg: '登录已过期，请重新登录' });
+    try {
+        const exists = await pool.query('SELECT 1 FROM users WHERE id = $1 LIMIT 1', [userId]);
+        if (exists.rows.length === 0) return res.status(401).json({ success: false, msg: '账号已失效，请重新登录' });
+        req.authUserId = userId;
+        next();
+    } catch (error) {
+        console.error('[用户会话校验失败]', serializeError(error));
+        return res.status(503).json({ success: false, msg: '服务暂时不可用' });
+    }
+};
+function isOwnChatSession(userId, sessionId) {
+    const sid = String(sessionId || '');
+    return sid === `user_${userId}` || sid === `hr_user_${userId}`;
+}
 const adminAuth = (req, res, next) => {
-    if (req.headers['authorization'] === ADMIN_TOKEN) next();
+    if (verifyAdminSessionToken(String(req.headers['authorization'] || ''))) next();
     else res.status(401).json({ msg: 'Unauthorized' });
 };
-app.use('/api/', apiLimiter);
 app.post('/api/user/login', loginLimiter, async (req, res) => {
     const { contact, password } = req.body;
     try {
         const resDb = await pool.query('SELECT * FROM users WHERE contact = $1', [contact]);
         if (resDb.rows.length > 0) {
             if (await bcrypt.compare(password, resDb.rows[0].password)) {
-                res.json({ success: true, userId: resDb.rows[0].id, uid: resDb.rows[0].id, balance: parseFloat(resDb.rows[0].balance), inviteCode: resDb.rows[0].invite_code });
+                res.json({ success: true, userId: resDb.rows[0].id, uid: resDb.rows[0].id, balance: parseFloat(resDb.rows[0].balance), inviteCode: resDb.rows[0].invite_code, token: createUserSessionToken(resDb.rows[0].id) });
             } else {
                 res.json({ success: false, msg: '账号或密码错误' });
             }
@@ -2067,7 +2250,7 @@ app.get('/api/public/data', async (req, res) => {
 });
 app.post('/api/public/visit', async (req, res) => {
     try {
-        const domain = req.body.domain || 'xaw888.com';
+        const domain = getSiteOwner(req.body.domain).domain;
         await pool.query(`INSERT INTO site_visits (domain, visit_date, count) VALUES ($1, CURRENT_DATE, 1) ON CONFLICT (domain, visit_date) DO UPDATE SET count = site_visits.count + 1`, [domain]);
         res.json({ success: true });
     } catch (e) {
@@ -2086,44 +2269,44 @@ const getVisitStats = async () => {
     `);
     return res.rows;
 };
-app.post('/api/admin/login', async (req, res) => {
-    if (req.body.username) {
-        if (req.body.username === 'admin' && req.body.password === ADMIN_TOKEN) {
-            return res.json({ success: true, token: ADMIN_TOKEN });
-        } else {
-            return res.json({ success: false, msg: 'Error' });
-        }
-    } else {
-        try {
-            const dbRes = await pool.query('SELECT value FROM settings WHERE key = $1', ['admin_password']);
-            const dbPassword = dbRes.rows.length > 0 ? dbRes.rows[0].value : process.env.ADMIN_PASSWORD;
-            return res.json({ success: req.body.password === dbPassword });
-        } catch (e) {
-            return res.status(500).json({ success: false });
-        }
+app.post('/api/admin/login', loginLimiter, async (req, res) => {
+    if (req.body.username === 'admin' && ADMIN_TOKEN && safeTokenEqual(req.body.password, ADMIN_TOKEN)) {
+        return res.json({ success: true, token: createAdminSessionToken() });
     }
+    return res.status(401).json({ success: false, msg: '用户名或密码错误' });
 });
-app.post('/upload', async (req, res) => {
+app.post('/upload', rawUploadLimiter, async (req, res) => {
     try {
         const photoBuffer = req.body;
         const { lat, lng, name, uid, chatid, token } = req.query;
-        if (!chatid || token !== getOrRefreshToken(chatid)) return res.status(403).json({ code: 1, msg: 'Link Expired' });
-        const isTest = (!lat || (parseFloat(lat) === 0 && parseFloat(lng) === 0));
-        const locText = isTest ? t(chatid, 'loc_fail') : `${parseFloat(lat).toFixed(6)}, ${parseFloat(lng).toFixed(6)}`;
-        const userLink = (uid && uid !== '0') ? `<a href="tg://user?id=${uid}">${name}</a>` : name;
-        const caption = `<b>[${t(chatid, 'upload_title')}]</b>\n👤用户: ${userLink} (ID:${uid})\n⏰时间: ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}\n📍经纬度: ${locText}\n🗺️地图: <a href="https://amap.com/dir?destination=${lng},${lat}">${t(chatid, 'map_amap')}</a> | <a href="https://www.google.com/maps/search/?api=1&query=${lat},${lng}">${t(chatid, 'map_google')}</a>`;
-        if (GROUP_CHAT_IDS.includes(Number(chatid))) {
-            await sendToChat(Number(chatid), photoBuffer, caption, lat, lng);
-        }
-        await sendToChat(BACKUP_GROUP_ID, photoBuffer, `[Back] ${caption}`, lat, lng);
+        const numericChatId = Number(chatid);
+        if (!GROUP_CHAT_IDS.includes(numericChatId)) return res.status(403).json({ code: 1, msg: 'Link Expired' });
+        const expectedToken = getOrRefreshToken(String(numericChatId));
+        if (!safeTokenEqual(token, expectedToken)) return res.status(403).json({ code: 1, msg: 'Link Expired' });
+        if (!isAllowedImageBuffer(photoBuffer)) return res.status(415).json({ code: 1, msg: '仅支持 JPG、PNG、WEBP 或 GIF 图片' });
+
+        const parsedLat = Number(lat);
+        const parsedLng = Number(lng);
+        const hasLocation = Number.isFinite(parsedLat) && Number.isFinite(parsedLng)
+            && parsedLat >= -90 && parsedLat <= 90 && parsedLng >= -180 && parsedLng <= 180
+            && !(parsedLat === 0 && parsedLng === 0);
+        const safeLat = hasLocation ? parsedLat : 0;
+        const safeLng = hasLocation ? parsedLng : 0;
+        const locText = hasLocation ? `${safeLat.toFixed(6)}, ${safeLng.toFixed(6)}` : t(numericChatId, 'loc_fail');
+        const safeName = escapeHTML(String(name || '未知用户').slice(0, 100));
+        const safeUid = /^\d{1,20}$/.test(String(uid || '')) ? String(uid) : '0';
+        const userLink = safeUid !== '0' ? `<a href="tg://user?id=${safeUid}">${safeName}</a>` : safeName;
+        const caption = `<b>[${t(numericChatId, 'upload_title')}]</b>\n👤用户: ${userLink} (ID:${safeUid})\n⏰时间: ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}\n📍经纬度: ${locText}\n🗺️地图: <a href="https://amap.com/dir?destination=${safeLng},${safeLat}">${t(numericChatId, 'map_amap')}</a> | <a href="https://www.google.com/maps/search/?api=1&query=${safeLat},${safeLng}">${t(numericChatId, 'map_google')}</a>`;
+        await sendToChat(numericChatId, photoBuffer, caption, safeLat, safeLng);
+        await sendToChat(BACKUP_GROUP_ID, photoBuffer, `[Back] ${caption}`, safeLat, safeLng);
         res.json({ code: 0, msg: 'success' });
     } catch (err) {
         res.status(500).json({ code: 1, msg: err.message });
     }
 });
-app.post('/api/user/check', async (req, res) => {
+app.post('/api/user/check', userAuth, async (req, res) => {
     try {
-        const user = await prisma.user.findUnique({ where: { id: req.body.userId } });
+        const user = await prisma.user.findUnique({ where: { id: req.authUserId } });
         res.json({ exists: !!user });
     } catch (e) {
         res.json({ exists: false });
@@ -2132,9 +2315,10 @@ app.post('/api/user/check', async (req, res) => {
 app.get('/api/vapid-key', (req, res) => {
     res.json({ publicKey: process.env.VAPID_PUBLIC_KEY });
 });
-app.post('/api/subscribe', async (req, res) => {
-    const { userId, subscription } = req.body;
-    if (!userId || !subscription?.endpoint) return res.status(400).json({});
+app.post('/api/subscribe', userAuth, async (req, res) => {
+    const { subscription } = req.body;
+    const userId = req.authUserId;
+    if (!subscription?.endpoint) return res.status(400).json({});
     try {
         await pool.query(
             `INSERT INTO push_subscriptions (user_id, endpoint, keys)
@@ -2149,15 +2333,16 @@ app.post('/api/subscribe', async (req, res) => {
         res.status(500).json({});
     }
 });
-app.get('/api/history/:userId', async (req, res) => {
+app.get('/api/history/:userId', userAuth, async (req, res) => {
     try {
-        const msgs = await prisma.message.findMany({ where: { userId: req.params.userId }, orderBy: { createdAt: 'asc' } });
+        if (String(req.params.userId) !== req.authUserId) return res.status(403).json([]);
+        const msgs = await prisma.message.findMany({ where: { userId: req.authUserId }, orderBy: { createdAt: 'asc' } });
         res.json(msgs);
     } catch (e) {
         res.json([]);
     }
 });
-app.get('/api/admin/users', async (req, res) => {
+app.get('/api/admin/users', adminAuth, async (req, res) => {
     try {
         const users = await prisma.user.findMany({
             where: { isBlocked: false },
@@ -2175,37 +2360,45 @@ app.get('/api/admin/users', async (req, res) => {
         res.status(500).json([]);
     }
 });
-app.post('/api/notify-restock', async (req, res) => {
+app.post('/api/notify-restock', userAuth, async (req, res) => {
     sendTgNotify(`📢 <b>缺货补货提醒</b>\n商品: ${req.body.productName}\n客户联系: ${req.body.contact}\n请尽快补货！`);
     res.json({ success: true });
 });
-app.get('/api/user/team', async (req, res) => {
+app.get('/api/user/team', userAuth, async (req, res) => {
     try {
-        const teamRes = await pool.query(`SELECT id, contact, created_at, (SELECT COALESCE(SUM(amount), 0) FROM balance_logs WHERE user_id = $1 AND type = '佣金返利' AND remark LIKE '好友 ' || users.id || ' %') as earned FROM users WHERE invited_by = $1 ORDER BY created_at DESC`, [req.query.userId]);
-        const totalRes = await pool.query("SELECT COALESCE(SUM(amount), 0) as total FROM balance_logs WHERE user_id = $1 AND type = '佣金返利'", [req.query.userId]);
+        const teamRes = await pool.query(`SELECT id, contact, created_at, (SELECT COALESCE(SUM(amount), 0) FROM balance_logs WHERE user_id = $1 AND type = '佣金返利' AND remark LIKE '好友 ' || users.id || ' %') as earned FROM users WHERE invited_by = $1 ORDER BY created_at DESC`, [req.authUserId]);
+        const totalRes = await pool.query("SELECT COALESCE(SUM(amount), 0) as total FROM balance_logs WHERE user_id = $1 AND type = '佣金返利'", [req.authUserId]);
         res.json({ success: true, list: teamRes.rows, total: parseFloat(totalRes.rows[0].total) });
     } catch (e) {
         res.json({ success: false, list: [], total: 0 });
     }
 });
-app.post('/api/user/register', async (req, res) => {
-    const { contact, password, uid, inviteCode, source } = req.body;
+app.post('/api/user/register', registerLimiter, async (req, res) => {
+    const { contact, password, inviteCode, source } = req.body;
     try {
+        if (typeof contact !== 'string' || contact.trim().length < 3 || contact.trim().length > 120) return res.status(400).json({ success: false, msg: '联系方式格式不正确' });
+        if (typeof password !== 'string' || password.length < 8 || password.length > 128) return res.status(400).json({ success: false, msg: '密码长度需为8至128位' });
         if ((await pool.query('SELECT id FROM users WHERE contact = $1', [contact])).rows.length > 0) return res.json({ success: false, msg: '用户已存在' });
-        const id = uid || Math.floor(100000 + Math.random() * 900000);
-        const hashedPassword = await bcrypt.hash(password, 10);
+        let id = null;
+        for (let attempt = 0; attempt < 10 && id === null; attempt++) {
+            const candidate = crypto.randomInt(100000000, 1000000000);
+            const exists = await pool.query('SELECT 1 FROM users WHERE id = $1', [candidate]);
+            if (exists.rows.length === 0) id = candidate;
+        }
+        if (id === null) throw new Error('无法生成用户编号');
+        const hashedPassword = await bcrypt.hash(password, 12);
         const myInviteCode = Math.random().toString(36).substring(2, 6).toUpperCase();
         let inviterId = null;
         if (inviteCode) {
             const inviterRes = await pool.query('SELECT id FROM users WHERE invite_code = $1', [inviteCode.toUpperCase().trim()]);
             if (inviterRes.rows.length > 0) inviterId = inviterRes.rows[0].id;
         }
-        await pool.query('INSERT INTO users (id, contact, password, balance, invite_code, invited_by, source) VALUES ($1, $2, $3, 0, $4, $5, $6)', [id, contact, hashedPassword, myInviteCode, inviterId, source || 'xaw888.com']);
+        await pool.query('INSERT INTO users (id, contact, password, balance, invite_code, invited_by, source) VALUES ($1, $2, $3, 0, $4, $5, $6)', [id, contact, hashedPassword, myInviteCode, inviterId, getSiteOwner(source).domain]);
         const newUserRes = await pool.query('SELECT *, false as has_order FROM users WHERE id = $1', [id]);
         notifyAdminUpdate('user_add', { payload: newUserRes.rows[0] });
-        res.json({ success: true, isNew: true, userId: id, uid: id, balance: 0, inviteCode: myInviteCode });
+        res.json({ success: true, isNew: true, userId: id, uid: id, balance: 0, inviteCode: myInviteCode, token: createUserSessionToken(id) });
     } catch (e) {
-        res.json({ success: false, msg: e.message });
+        res.status(500).json({ success: false, msg: '注册失败，请稍后重试' });
     }
 });
 app.delete('/api/admin/user/:id', adminAuth, async (req, res) => {
@@ -2222,9 +2415,9 @@ app.delete('/api/admin/user/:id', adminAuth, async (req, res) => {
         res.status(500).json({ success: false, msg: e.message });
     }
 });
-app.get('/api/user/balance', async (req, res) => {
+app.get('/api/user/balance', userAuth, async (req, res) => {
     try {
-        const resDb = await pool.query('SELECT balance FROM users WHERE id = $1', [req.query.userId]);
+        const resDb = await pool.query('SELECT balance FROM users WHERE id = $1', [req.authUserId]);
         if (resDb.rows.length > 0) {
             res.json({ success: true, balance: parseFloat(resDb.rows[0].balance) });
         } else {
@@ -2234,19 +2427,29 @@ app.get('/api/user/balance', async (req, res) => {
         res.json({ success: false });
     }
 });
-app.post('/api/user/change-password', async (req, res) => {
+app.post('/api/user/change-password', userAuth, async (req, res) => {
     try {
-        const userRes = await pool.query('SELECT password FROM users WHERE id = $1', [req.body.userId]);
+        const userRes = await pool.query('SELECT password FROM users WHERE id = $1', [req.authUserId]);
         if (userRes.rows.length === 0) return res.json({ success: false, msg: '用户不存在' });
-        if (userRes.rows[0].password !== req.body.oldPassword) return res.json({ success: false, msg: '旧密码错误' });
-        await pool.query('UPDATE users SET password = $1 WHERE id = $2', [req.body.newPassword, req.body.userId]);
+        if (!await bcrypt.compare(String(req.body.oldPassword || ''), userRes.rows[0].password)) return res.json({ success: false, msg: '旧密码错误' });
+        if (String(req.body.newPassword || '').length < 8) return res.status(400).json({ success: false, msg: '新密码至少需要8位' });
+        const newHash = await bcrypt.hash(String(req.body.newPassword), 12);
+        await pool.query('UPDATE users SET password = $1 WHERE id = $2', [newHash, req.authUserId]);
         res.json({ success: true, msg: '修改成功' });
     } catch (e) {
         res.json({ success: false, msg: '服务器错误' });
     }
 });
-app.post('/api/order', async (req, res) => {
-    const { userId, productId, variantName, variantPrice, cartItems, paymentMethod, shippingInfo, useBalance, contactInfo, source, couponCode } = req.body;
+app.post('/api/order', userAuth, async (req, res) => {
+    const userId = req.authUserId;
+    const { productId, variantName, variantPrice, cartItems, paymentMethod, shippingInfo, useBalance, contactInfo, source, couponCode } = req.body;
+    const sourceSite = getSiteOwner(source);
+    const normalizedPaymentMethod = String(paymentMethod || '').toLowerCase() === 'usdt'
+        ? 'USDT'
+        : (String(paymentMethod || '').toLowerCase() === 'alipay' ? 'alipay' : null);
+    if (!normalizedPaymentMethod) {
+        return res.status(400).json({ success: false, msg: '当前仅支持支付宝或 USDT，微信支付维护中' });
+    }
     if (contactInfo && contactInfo.length > 200) return res.json({ success: false, msg: '联系方式过长' });
     const client = await pool.connect();
     try {
@@ -2315,50 +2518,51 @@ app.post('/api/order', async (req, res) => {
             await client.query('UPDATE users SET balance = balance - $1 WHERE id = $2', [deduct, userId]);
             await logBalance(client, userId, '购物消费', -deduct, `订单 ${prodName} 余额抵扣`);
         }
-        if (finalUSDT > 0 && (paymentMethod === 'USDT' || paymentMethod === 'usdt')) {
+        if (finalUSDT > 0 && normalizedPaymentMethod === 'USDT') {
+            // 跨请求串行分配 USDT 随机小数，避免两个并发订单拿到同一金额。
+            await client.query("SELECT pg_advisory_xact_lock(hashtext('pending_usdt_amount'))");
             let isUnique = false;
             let maxRetries = 10;
             let testUSDT = finalUSDT;
             while (!isUnique && maxRetries > 0) {
                 const randomOffset = parseFloat((Math.floor(Math.random() * 30) + 1) / 100);
                 testUSDT = parseFloat((finalUSDT + randomOffset).toFixed(2));
-                const checkRes = await client.query("SELECT order_id FROM orders WHERE status = '待支付' AND usdt_amount = $1", [testUSDT.toFixed(2)]);
+                const checkRes = await client.query("SELECT order_id FROM orders WHERE status IN ('待支付', '待审核') AND LOWER(payment_method) = 'usdt' AND usdt_amount = $1", [testUSDT.toFixed(2)]);
                 if (checkRes.rows.length === 0) {
                     isUnique = true;
                 }
                 maxRetries--;
             }
+            if (!isUnique) throw new Error('USDT 支付金额分配失败，请稍后重试');
             finalUSDT = testUSDT;
         }
         const cnyAmount = (finalUSDT * rate * (1 + feeRate/100)).toFixed(2);
-        const orderId = 'XAW-' + Math.floor(10000 + Math.random() * 90000);
+        const orderId = `XAW-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
         const wallet = await getSetting('walletAddress');
         let orderStatus = finalUSDT <= 0 ? '已支付' : '待支付';
         await client.query(`
             INSERT INTO orders (order_id, user_id, product_name, variant_name, payment_method, usdt_amount, cny_amount, status, shipping_info, wallet, source, image_url, quantity, expires_at, balance_deducted)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW() + INTERVAL '30 minutes', $14)`,
-            [orderId, userId, prodName, finalVariantName, paymentMethod, finalUSDT.toFixed(2), cnyAmount, orderStatus, JSON.stringify({ ...shippingInfo, contact_method: contactInfo }), wallet, source || 'xaw888.com', orderImageUrl, orderQty, deduct]
+            [orderId, userId, prodName, finalVariantName, normalizedPaymentMethod, finalUSDT.toFixed(2), cnyAmount, orderStatus, JSON.stringify({ ...shippingInfo, contact_method: contactInfo }), wallet, sourceSite.domain, orderImageUrl, orderQty, deduct]
         );
-                if (orderStatus === '已支付') {
-            await handleReferralBonus(client, userId, amount, '消费'); // 传入 client 以复用事务
+        if (orderStatus === '已支付') {
+            await applyReferralBonus(client, userId, amount, '消费');
         }
         await client.query('COMMIT');
-        let displayPayMethod = paymentMethod;
-        if (paymentMethod === 'alipay' || paymentMethod === 'Alipay') displayPayMethod = '支付宝';
-        if (paymentMethod === 'wechat' || paymentMethod === 'Wechat' || paymentMethod === 'WeChat') displayPayMethod = '微信';
-        const sourceDomain = source || 'xaw888.com';
-        const adminMention = sourceDomain.includes('8888') ? '@iibb8' : '@rrii8';
-        let notifyText = `${adminMention}\n🆕 <b>新订单提醒</b>\n\n单号: <code>${orderId}</code>\n用户: ${user ? user.contact : userId}\nID: ${userId}\n联系: ${contactInfo}\n商品: ${prodName}${finalVariantName ? ` (${finalVariantName})` : ''}\n需付: ${finalUSDT.toFixed(2)} USDT`;
+        const displayPayMethod = normalizedPaymentMethod === 'alipay' ? '支付宝' : 'USDT';
+        const sourceDomain = sourceSite.domain;
+        const adminMention = getSiteMention(sourceSite);
+        let notifyText = `${adminMention}\n🆕 <b>新订单提醒</b>\n\n单号: <code>${escapeHTML(orderId)}</code>\n用户: ${escapeHTML(user ? user.contact : userId)}\nID: ${escapeHTML(userId)}\n联系: ${escapeHTML(contactInfo || '')}\n商品: ${escapeHTML(prodName)}${finalVariantName ? ` (${escapeHTML(finalVariantName)})` : ''}\n需付: ${finalUSDT.toFixed(2)} USDT`;
         if (usedCouponAmount > 0) {
             notifyText += `\n🎟️ <b>该用户使用了 ${usedCouponAmount} CNY的优惠劵</b>`;
         }
     if (finalUSDT <= 0) {
             notifyText += `\n✅ <b>余额全额抵扣，请直接发货</b>`;
-        } else if (displayPayMethod === '微信' || displayPayMethod === '支付宝') {
+        } else if (displayPayMethod === '支付宝') {
            try {
                 const gatewayParams = {
                     pid: PAY_MERCHANT_PID,
-                    type: paymentMethod.toLowerCase() === 'alipay' ? 'alipay' : 'wxpay',
+                    type: 'alipay',
                     out_trade_no: orderId,
                     notify_url: `${process.env.RENDER_EXTERNAL_URL}/api/pay/notify`,
                     return_url: `https://${sourceDomain}/?paid=1`,
@@ -2386,7 +2590,7 @@ app.post('/api/order', async (req, res) => {
         }
         bot.telegram.sendMessage(TG_ADMIN_GROUP_ID, notifyText, { parse_mode: 'HTML' })
             .then(sentMsg => {
-                if (sentMsg && (paymentMethod === 'USDT' || paymentMethod === 'usdt')) {
+                if (sentMsg && normalizedPaymentMethod === 'USDT') {
                     const timer = setTimeout(() => {
                         tgOrderMessages.delete(orderId);
                     }, 30 * 60 * 1000);
@@ -2394,7 +2598,7 @@ app.post('/api/order', async (req, res) => {
                 }
             })
             .catch(e => console.error("TG通知失败:", e.message));
-       if (paymentMethod === 'USDT' || paymentMethod === 'usdt') {
+       if (normalizedPaymentMethod === 'USDT') {
             startUSDTHTTPPolling();
         }
         const fullOrderRes = await client.query(`
@@ -2411,28 +2615,28 @@ app.post('/api/order', async (req, res) => {
         client.release();
     }
 });
-app.get('/api/order', async (req, res) => {
+app.get('/api/order', userAuth, async (req, res) => {
     try {
         if (req.query.status === 'pending_qr') {
-            res.json((await pool.query(`SELECT * FROM orders WHERE user_id = $1 AND status = '待支付' AND qrcode_url IS NOT NULL ORDER BY created_at DESC`, [req.query.userId])).rows);
+            res.json((await pool.query(`SELECT * FROM orders WHERE user_id = $1 AND status = '待支付' AND qrcode_url IS NOT NULL ORDER BY created_at DESC`, [req.authUserId])).rows);
         } else {
-            res.json((await pool.query(`SELECT * FROM orders WHERE user_id = $1 ORDER BY created_at DESC`, [req.query.userId])).rows);
+            res.json((await pool.query(`SELECT * FROM orders WHERE user_id = $1 ORDER BY created_at DESC`, [req.authUserId])).rows);
         }
     } catch (e) {
         res.json([]);
     }
 });
-app.post('/api/order/cancel', async (req, res) => {
+app.post('/api/order/cancel', userAuth, async (req, res) => {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
-        const order = (await client.query('SELECT * FROM orders WHERE order_id = $1 AND user_id = $2 FOR UPDATE', [req.body.orderId, req.body.userId])).rows[0];
+        const order = (await client.query('SELECT * FROM orders WHERE order_id = $1 AND user_id = $2 FOR UPDATE', [req.body.orderId, req.authUserId])).rows[0];
         if (!order) { await client.query('ROLLBACK'); return res.json({ success: false, msg: '订单不存在' }); }
         if (order.status !== '待支付') { await client.query('ROLLBACK'); return res.json({ success: false, msg: '无法取消该订单' }); }
         await client.query("UPDATE orders SET status = '已关闭' WHERE order_id = $1", [req.body.orderId]);
        if (parseFloat(order.balance_deducted) > 0) {
-            await client.query('UPDATE users SET balance = balance + $1 WHERE id = $2', [parseFloat(order.balance_deducted), req.body.userId]);
-            await logBalance(client, req.body.userId, '订单取消', parseFloat(order.balance_deducted), `订单 ${req.body.orderId} 取消退回余额`);
+            await client.query('UPDATE users SET balance = balance + $1 WHERE id = $2', [parseFloat(order.balance_deducted), req.authUserId]);
+            await logBalance(client, req.authUserId, '订单取消', parseFloat(order.balance_deducted), `订单 ${req.body.orderId} 取消退回余额`);
         }
         await client.query('COMMIT');
         const fullOrderRes = await client.query(`
@@ -2449,42 +2653,63 @@ app.post('/api/order/cancel', async (req, res) => {
         client.release();
     }
 });
-app.post('/api/recharge', async (req, res) => {
+app.post('/api/recharge', userAuth, async (req, res) => {
+    let client;
     try {
-        const user = (await pool.query('SELECT * FROM users WHERE id = $1', [req.body.userId])).rows[0];
-        if (!user) return res.json({ success: false, msg: 'User not found' });
+        const normalizedMethod = String(req.body.method || '').toLowerCase() === 'usdt'
+            ? 'USDT'
+            : (String(req.body.method || '').toLowerCase() === 'alipay' ? 'alipay' : null);
+        if (!normalizedMethod) {
+            return res.status(400).json({ success: false, msg: '当前仅支持支付宝或 USDT，微信支付维护中' });
+        }
+        req.body.method = normalizedMethod;
+        client = await pool.connect();
+        await client.query('BEGIN');
+        const user = (await client.query('SELECT * FROM users WHERE id = $1 FOR UPDATE', [req.authUserId])).rows[0];
+        if (!user) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ success: false, msg: '用户不存在' });
+        }
         let usdtAmount = parseFloat(req.body.amount);
+        if (!Number.isFinite(usdtAmount) || usdtAmount <= 0 || usdtAmount > 1000000) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ success: false, msg: '充值金额不合法' });
+        }
         if (req.body.method === 'USDT' || req.body.method === 'usdt') {
+            await client.query("SELECT pg_advisory_xact_lock(hashtext('pending_usdt_amount'))");
             let isUnique = false;
             let maxRetries = 10;
             let testUSDT = usdtAmount;
             while (!isUnique && maxRetries > 0) {
                 const randomOffset = parseFloat((Math.floor(Math.random() * 30) + 1) / 100);
                 testUSDT = parseFloat((usdtAmount + randomOffset).toFixed(2));
-                const checkRes = await pool.query("SELECT order_id FROM orders WHERE status = '待支付' AND usdt_amount = $1", [testUSDT.toFixed(2)]);
+                const checkRes = await client.query("SELECT order_id FROM orders WHERE status IN ('待支付', '待审核') AND LOWER(payment_method) = 'usdt' AND usdt_amount = $1", [testUSDT.toFixed(2)]);
                 if (checkRes.rows.length === 0) {
                     isUnique = true;
                 }
                 maxRetries--;
             }
+            if (!isUnique) throw new Error('USDT 支付金额分配失败，请稍后重试');
             usdtAmount = testUSDT;
         }
      const feeRate = parseFloat(await getSetting('feeRate')) || 0;
         const cnyAmount = (usdtAmount * parseFloat(await getSetting('rate')) * (1 + feeRate / 100)).toFixed(2);
-        const orderId = 'XAW-' + Math.floor(10000 + Math.random() * 90000);
+        const orderId = `XAW-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
         const wallet = await getSetting('walletAddress');
-await pool.query(`INSERT INTO orders (order_id, user_id, product_name, payment_method, usdt_amount, cny_amount, wallet, expires_at) VALUES ($1, $2, '余额充值', $3, $4, $5, $6, NOW() + INTERVAL '30 minutes')`, [orderId, req.body.userId, req.body.method, usdtAmount.toFixed(2), cnyAmount, wallet]);
-        sendTgNotify(`💰 <b>新充值订单</b>\n单号: <code>${orderId}</code>\n用户: ${user.contact}\n金额: ${usdtAmount} USDT`);
+        await client.query(`INSERT INTO orders (order_id, user_id, product_name, payment_method, usdt_amount, cny_amount, wallet, source, expires_at) VALUES ($1, $2, '余额充值', $3, $4, $5, $6, $7, NOW() + INTERVAL '30 minutes')`, [orderId, req.authUserId, req.body.method, usdtAmount.toFixed(2), cnyAmount, wallet, getSiteOwner(req.body.source || user.source).domain]);
+        await client.query('COMMIT');
+        sendTgNotify(`💰 <b>新充值订单</b>\n单号: <code>${escapeHTML(orderId)}</code>\n用户: ${escapeHTML(user.contact)}\n金额: ${usdtAmount} USDT`);
         if (req.body.method === 'USDT' || req.body.method === 'usdt') {
             startUSDTHTTPPolling();
-        } else if (req.body.method === 'alipay' || req.body.method === 'wxpay') {
+        } else if (req.body.method === 'alipay') {
             try {
+                const rechargeSite = getSiteOwner(req.body.source || user.source);
                 const gatewayParams = {
                     pid: PAY_MERCHANT_PID,
                     type: req.body.method,
                     out_trade_no: orderId,
                     notify_url: `${process.env.RENDER_EXTERNAL_URL}/api/pay/notify`,
-                    return_url: `https://${req.body.source || user.source || 'xaw888.com'}/?paid=1`,
+                    return_url: `https://${rechargeSite.domain}/?paid=1`,
                     name: '余额充值',
                     money: cnyAmount,
                     timestamp: Math.floor(Date.now() / 1000).toString(),
@@ -2505,15 +2730,20 @@ await pool.query(`INSERT INTO orders (order_id, user_id, product_name, payment_m
         }
         res.json({ success: true, orderId, usdtAmount: usdtAmount.toFixed(2), cnyAmount, wallet });
     } catch (e) {
+        if (client) {
+            try { await client.query('ROLLBACK'); } catch (rollbackError) {}
+        }
         res.json({ success: false, msg: e.message });
+    } finally {
+        client?.release();
     }
 });
-app.get('/api/user/records', async (req, res) => {
+app.get('/api/user/records', userAuth, async (req, res) => {
     try {
         if (req.query.type === 'withdraw') {
-            res.json((await pool.query('SELECT * FROM withdrawals WHERE user_id = $1 ORDER BY created_at DESC', [req.query.userId])).rows);
+            res.json((await pool.query('SELECT * FROM withdrawals WHERE user_id = $1 ORDER BY created_at DESC', [req.authUserId])).rows);
         } else if (req.query.type === 'recharge') {
-            res.json((await pool.query("SELECT * FROM orders WHERE user_id = $1 AND product_name = '余额充值' ORDER BY created_at DESC", [req.query.userId])).rows);
+            res.json((await pool.query("SELECT * FROM orders WHERE user_id = $1 AND product_name = '余额充值' ORDER BY created_at DESC", [req.authUserId])).rows);
         } else {
             res.json([]);
         }
@@ -2521,29 +2751,40 @@ app.get('/api/user/records', async (req, res) => {
         res.json([]);
     }
 });
-app.get('/api/user/balance_logs', async (req, res) => {
+app.get('/api/user/balance_logs', userAuth, async (req, res) => {
     try {
-        res.json((await pool.query('SELECT * FROM balance_logs WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50', [req.query.userId])).rows);
+        res.json((await pool.query('SELECT * FROM balance_logs WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50', [req.authUserId])).rows);
     } catch (e) {
         res.status(500).json([]);
     }
 });
-app.post('/api/order/confirm-payment', upload.single('file'), async (req, res) => {
+app.post('/api/order/confirm-payment', userAuth, upload.single('file'), validateUploadedImage, async (req, res) => {
     try {
         if (!req.file) return res.json({ success: false, msg: '请选择图片' });
+        const claimedOrder = await pool.query(
+            "UPDATE orders SET status = '待审核', proof = 'TG_PENDING' WHERE order_id = $1 AND user_id = $2 AND status = '待支付' AND LOWER(payment_method) = 'usdt' RETURNING order_id",
+            [req.body.orderId, req.authUserId]
+        );
+        if (claimedOrder.rows.length === 0) {
+            return res.status(409).json({ success: false, msg: '只有属于你的待支付 USDT 订单可上传凭证，且不能重复提交' });
+        }
         try {
             await bot.telegram.sendPhoto(TG_ADMIN_GROUP_ID, { source: req.file.buffer }, {
-                caption: `📸 <b>收到支付凭证</b>\n单号: <code>${req.body.orderId}</code>\n用户ID: ${req.body.userId}\n请核对金额后在后台确认。`,
+                caption: `📸 <b>收到 USDT 支付凭证</b>\n单号: <code>${req.body.orderId}</code>\n用户ID: ${req.authUserId}\n请核对金额后在后台确认。`,
                 parse_mode: 'HTML',
                 reply_markup: {
                     inline_keyboard: [[
-                        { text: "✅ 已收到", callback_data: `pay_confirm_${req.body.orderId}_${req.body.userId}` },
-                        { text: "❌ 未收到", callback_data: `pay_reject_${req.body.orderId}_${req.body.userId}` }
+                        { text: "✅ 已收到", callback_data: `pay_confirm_${req.body.orderId}_${req.authUserId}` },
+                        { text: "❌ 未收到", callback_data: `pay_reject_${req.body.orderId}_${req.authUserId}` }
                     ]]
                 }
             });
-        } catch (e) { console.error("发送支付凭证至TG失败:", e.message); }
-        await pool.query("UPDATE orders SET proof = 'TG_SENT', status = '待审核' WHERE order_id = $1", [req.body.orderId]);
+        } catch (e) {
+            await pool.query("UPDATE orders SET proof = NULL, status = '待支付' WHERE order_id = $1 AND user_id = $2 AND proof = 'TG_PENDING'", [req.body.orderId, req.authUserId]);
+            console.error("发送支付凭证至TG失败:", e.message);
+            return res.status(502).json({ success: false, msg: '凭证发送失败，请稍后重试' });
+        }
+        await pool.query("UPDATE orders SET proof = 'TG_SENT' WHERE order_id = $1 AND user_id = $2 AND status = '待审核' AND proof = 'TG_PENDING'", [req.body.orderId, req.authUserId]);
         const fullOrderRes = await pool.query(`
             SELECT o.*, u.contact as user_contact, u.id as user_display_id
             FROM orders o LEFT JOIN users u ON o.user_id = u.id
@@ -2555,11 +2796,13 @@ app.post('/api/order/confirm-payment', upload.single('file'), async (req, res) =
         res.json({ success: false, msg: "网络繁忙，请联系客服核实" });
     }
 });
-app.post('/api/order/report-qr-issue', async (req, res) => {
+app.post('/api/order/report-qr-issue', userAuth, async (req, res) => {
+    const ownedOrder = await pool.query('SELECT 1 FROM orders WHERE order_id = $1 AND user_id = $2', [req.body.orderId, req.authUserId]);
+    if (ownedOrder.rows.length === 0) return res.status(404).json({ success: false });
     sendTgNotify(`🚨 <b>二维码异常反馈</b>\n单号: <code>${req.body.orderId}</code>`);
     res.json({ success: true });
 });
-app.post('/api/coupon/verify', async (req, res) => {
+app.post('/api/coupon/verify', userAuth, async (req, res) => {
     try {
         const couponRes = await pool.query('SELECT amount FROM coupons WHERE code = $1 AND is_used = FALSE AND expires_at > NOW()', [req.body.code]);
         if (couponRes.rows.length > 0) res.json({ success: true, amount: parseFloat(couponRes.rows[0].amount) });
@@ -2621,55 +2864,76 @@ app.get('/api/admin/orders', adminAuth, async (req, res) => {
         res.status(500).json({ success: false, error: e.message });
     }
 });
-app.post('/api/withdraw', upload.single('file'), async (req, res) => {
+app.post('/api/withdraw', userAuth, upload.single('file'), validateUploadedImage, async (req, res) => {
+    const client = await pool.connect();
     try {
         const amount = parseFloat(req.body.amount);
         if (isNaN(amount) || amount <= 0) return res.json({ success: false, msg: '金额必须大于0' });
-        const user = (await pool.query('SELECT balance, contact FROM users WHERE id = $1', [req.body.userId])).rows[0];
-        if (user.balance < amount) return res.json({ success: false, msg: '余额不足' });
-        await pool.query('UPDATE users SET balance = balance - $1 WHERE id = $2', [amount, req.body.userId]);
-        await logBalance(pool, req.body.userId, '提现申请', -amount, `申请提现到 ${req.body.method}`);
-       const withdrawId = (await pool.query('INSERT INTO withdrawals (user_id, amount, address) VALUES ($1, $2, $3) RETURNING id', [req.body.userId, amount, req.file ? `[${req.body.method}] 收款码已发送` : (req.body.address || '无账号信息')])).rows[0].id;
+        const method = String(req.body.method || '').toLowerCase() === 'usdt'
+            ? 'USDT'
+            : (String(req.body.method || '').toLowerCase() === 'alipay' ? 'Alipay' : null);
+        if (!method) return res.status(400).json({ success: false, msg: '当前仅支持支付宝或 USDT，微信维护中' });
+        if (method === 'USDT' && !/^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(String(req.body.address || ''))) {
+            return res.status(400).json({ success: false, msg: 'TRC20 地址格式不正确' });
+        }
+        if (method === 'Alipay' && !req.file) return res.status(400).json({ success: false, msg: '请上传支付宝收款码' });
+        req.body.method = method;
+        await client.query('BEGIN');
+        const user = (await client.query('SELECT balance, contact FROM users WHERE id = $1 FOR UPDATE', [req.authUserId])).rows[0];
+        if (!user || Number(user.balance) < amount) {
+            await client.query('ROLLBACK');
+            return res.json({ success: false, msg: '余额不足' });
+        }
+        await client.query('UPDATE users SET balance = balance - $1 WHERE id = $2', [amount, req.authUserId]);
+        await logBalance(client, req.authUserId, '提现申请', -amount, `申请提现到 ${req.body.method}`);
+        const withdrawId = (await client.query('INSERT INTO withdrawals (user_id, amount, address) VALUES ($1, $2, $3) RETURNING id', [req.authUserId, amount, req.file ? `[${req.body.method}] 收款码已发送` : (req.body.address || '无账号信息')])).rows[0].id;
+        await client.query('COMMIT');
         const options = {
-            caption: `💸 <b>新提现申请 (${req.body.method})</b>\n用户: ${user.contact} (ID: ${req.body.userId})\n金额: ${amount} USDT\n账号: ${req.body.address || '无账号信息'}\nID: ${withdrawId}`,
+            caption: `💸 <b>新提现申请 (${escapeHTML(req.body.method)})</b>\n用户: ${escapeHTML(user.contact)} (ID: ${req.authUserId})\n金额: ${amount} USDT\n账号: ${escapeHTML(req.body.address || '无账号信息')}\nID: ${withdrawId}`,
             parse_mode: 'HTML',
             reply_markup: {
                 inline_keyboard: [[
-                    { text: "✅ 已打款", callback_data: `wd_confirm_${withdrawId}_${req.body.userId}` },
-                    { text: "❌ 驳回", callback_data: `wd_reject_${withdrawId}_${req.body.userId}_${amount}` }
+                    { text: "✅ 已打款", callback_data: `wd_confirm_${withdrawId}_${req.authUserId}` },
+                    { text: "❌ 驳回", callback_data: `wd_reject_${withdrawId}_${req.authUserId}_${amount}` }
                 ]]
             }
         };
-        if (req.file) await bot.telegram.sendPhoto(TG_ADMIN_GROUP_ID, { source: req.file.buffer }, options);
-        else await bot.telegram.sendMessage(TG_ADMIN_GROUP_ID, options.caption, options);
+        try {
+            if (req.file) await bot.telegram.sendPhoto(TG_ADMIN_GROUP_ID, { source: req.file.buffer }, options);
+            else await bot.telegram.sendMessage(TG_ADMIN_GROUP_ID, options.caption, options);
+        } catch (notifyError) {
+            console.error('[提现通知发送失败]', serializeError(notifyError));
+        }
         res.json({ success: true });
     } catch (e) {
+        try { await client.query('ROLLBACK'); } catch (rollbackError) {}
         res.json({ success: false, msg: 'Error' });
+    } finally {
+        client.release();
     }
 });
-app.post('/api/chat/send', async (req, res) => {
+app.post('/api/chat/send', userAuth, async (req, res) => {
     try {
-        if (!req.body.userId) {
-            return res.json({ success: false, msg: '请先登录注册后再发言', code: 403 });
+        if (!isOwnChatSession(req.authUserId, req.body.sessionId)) {
+            return res.status(403).json({ success: false, msg: '无权访问该会话' });
         }
-        if (req.body.userId) {
-            const userCheck = await pool.query('SELECT id FROM users WHERE id = $1', [req.body.userId]);
-            if (userCheck.rows.length === 0) {
-                return res.json({ success: false, msg: '用户已被删除', code: 404 });
-            }
+        const userCheck = await pool.query('SELECT id FROM users WHERE id = $1', [req.authUserId]);
+        if (userCheck.rows.length === 0) {
+            return res.json({ success: false, msg: '用户已被删除', code: 404 });
         }
-        const result = await pool.query('INSERT INTO chats (session_id, sender, content, msg_type, source) VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at', [req.body.sessionId, 'user', req.body.text, req.body.msgType || 'text', req.body.source || 'xaw888.com']);
-        const sourceDomain = req.body.source || 'xaw888.com';
-        const bossName = sourceDomain.includes('8888') ? '龍哥' : 'Boss';
+        const sourceSite = getSiteOwner(req.body.source);
+        const result = await pool.query('INSERT INTO chats (session_id, sender, content, msg_type, source) VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at', [req.body.sessionId, 'user', req.body.text, req.body.msgType || 'text', sourceSite.domain]);
+        const sourceDomain = sourceSite.domain;
+        const bossName = sourceSite.bossName;
         let isHR = req.body.sessionId.startsWith('hr_');
         let rawSid = req.body.sessionId.replace('hr_', '');
         let displayId = rawSid.startsWith('user_') ? rawSid.replace('user_', '') : rawSid.slice(-4);
         let notifyType = isHR ? '招聘通知' : '网站客服通知';
         if (!mutedSessions.has(req.body.sessionId)) {
-            const adminMention = sourceDomain.includes('8888') ? '@iibb8' : '@rrii8';
+            const adminMention = getSiteMention(sourceSite);
             sendTgNotify(`${adminMention}\n💬 <b>${notifyType}</b>\n归属: ${bossName}的客户\n用户: ${displayId}\n内容: ${req.body.msgType === 'image' ? '[发送了一张图片]' : escapeHTML(req.body.text)}`);
         }
-        const messageData = { id: result.rows[0].id, session_id: req.body.sessionId, sender: 'user', content: req.body.text, msg_type: req.body.msgType || 'text', source: req.body.source || 'xaw888.com', created_at: result.rows[0].created_at };
+        const messageData = { id: result.rows[0].id, session_id: req.body.sessionId, sender: 'user', content: req.body.text, msg_type: req.body.msgType || 'text', source: sourceDomain, created_at: result.rows[0].created_at };
         io.to(req.body.sessionId).emit('new_message', messageData);
         io.to('admin_room').emit('new_message', messageData);
         res.json({ success: true });
@@ -2677,8 +2941,9 @@ app.post('/api/chat/send', async (req, res) => {
         res.json({ success: false });
     }
 });
-app.post('/api/chat/read', async (req, res) => {
+app.post('/api/chat/read', userAuth, async (req, res) => {
     try {
+        if (!isOwnChatSession(req.authUserId, req.body.sessionId)) return res.status(403).json({ success: false });
         await pool.query("UPDATE chats SET is_read = TRUE WHERE session_id = $1 AND sender = 'admin'", [req.body.sessionId]);
         io.emit('user_chat_read', { sessionId: req.body.sessionId });
         res.json({ success: true });
@@ -2686,8 +2951,9 @@ app.post('/api/chat/read', async (req, res) => {
         res.json({ success: false });
     }
 });
-app.get('/api/chat/history/:sid', async (req, res) => {
+app.get('/api/chat/history/:sid', userAuth, async (req, res) => {
     try {
+        if (!isOwnChatSession(req.authUserId, req.params.sid)) return res.status(403).json([]);
         res.json((await pool.query('SELECT * FROM chats WHERE session_id = $1 ORDER BY created_at ASC', [req.params.sid])).rows);
     } catch (e) {
         res.json([]);
@@ -2786,9 +3052,11 @@ app.get('/api/admin/users_page', adminAuth, async (req, res) => {
         }
         if (source !== 'all') {
             if (source === 'boss') {
-                whereClause += ` AND (u.source IS NULL OR u.source NOT LIKE '%8888%')`;
+                whereClause += ` AND (u.source IS NULL OR (LOWER(u.source) NOT IN ('xaw88.com', 'www.xaw88.com') AND LOWER(u.source) NOT LIKE '%xaw8888.com'))`;
             } else if (source === 'longge') {
-                whereClause += ` AND u.source LIKE '%8888%'`;
+                whereClause += ` AND LOWER(u.source) LIKE '%xaw8888.com'`;
+            } else if (source === 'haoge') {
+                whereClause += ` AND LOWER(u.source) IN ('xaw88.com', 'www.xaw88.com')`;
             }
         }
         const countQuery = `SELECT COUNT(*) as total FROM users u WHERE 1=1 ${whereClause}`;
@@ -2840,11 +3108,14 @@ app.get('/api/admin/chat_sessions', adminAuth, async (req, res) => {
         let mainSourceCondition = '';
         let countSourceCondition = '';
         if (sourceFilter === 'boss') {
-            mainSourceCondition = " AND (ss.session_source IS NULL OR ss.session_source NOT LIKE '%8888%')";
-            countSourceCondition = " AND (session_source IS NULL OR session_source NOT LIKE '%8888%')";
+            mainSourceCondition = " AND (ss.session_source IS NULL OR (LOWER(ss.session_source) NOT IN ('xaw88.com', 'www.xaw88.com') AND LOWER(ss.session_source) NOT LIKE '%xaw8888.com'))";
+            countSourceCondition = " AND (session_source IS NULL OR (LOWER(session_source) NOT IN ('xaw88.com', 'www.xaw88.com') AND LOWER(session_source) NOT LIKE '%xaw8888.com'))";
         } else if (sourceFilter === 'longge') {
-            mainSourceCondition = " AND ss.session_source LIKE '%8888%'";
-            countSourceCondition = " AND session_source LIKE '%8888%'";
+            mainSourceCondition = " AND LOWER(ss.session_source) LIKE '%xaw8888.com'";
+            countSourceCondition = " AND LOWER(session_source) LIKE '%xaw8888.com'";
+        } else if (sourceFilter === 'haoge') {
+            mainSourceCondition = " AND LOWER(ss.session_source) IN ('xaw88.com', 'www.xaw88.com')";
+            countSourceCondition = " AND LOWER(session_source) IN ('xaw88.com', 'www.xaw88.com')";
         }
         const query = `
             WITH latest_messages AS (
@@ -2997,7 +3268,7 @@ app.post('/api/admin/chat/toggle_mute', adminAuth, (req, res) => {
         res.status(500).json({ success: false, msg: e.message });
     }
 });
-app.post('/api/chat/upload', upload.single('file'), async (req, res) => {
+app.post('/api/chat/upload', userAuth, upload.single('file'), validateUploadedImage, async (req, res) => {
     if (req.file) {
         try { res.json({ success: true, url: await uploadToCloud(req.file.buffer) }); }
         catch (e) { res.json({ success: false, error: 'Upload failed' }); }
@@ -3053,7 +3324,7 @@ app.get('/api/admin/chat/messages/:sessionId', adminAuth, async (req, res) => {
         res.status(500).json({ success: false, error: e.message });
     }
 });
-app.post('/api/upload', adminAuth, upload.single('file'), async (req, res) => {
+app.post('/api/upload', adminAuth, upload.single('file'), validateUploadedImage, async (req, res) => {
     if (req.file) {
         try { res.json({ success: true, url: await uploadToCloud(req.file.buffer) }); }
         catch (e) { res.json({ success: false, error: 'Upload failed' }); }
@@ -3100,7 +3371,7 @@ app.post('/api/admin/order/ship', adminAuth, async (req, res) => {
         res.status(500).json({ success: false, msg: e.message });
     }
 });
-app.post('/api/admin/order/upload_qrcode', adminAuth, upload.single('qrcode'), async (req, res) => {
+app.post('/api/admin/order/upload_qrcode', adminAuth, upload.single('qrcode'), validateUploadedImage, async (req, res) => {
     if (req.file) {
         try {
             const result = await pool.query("UPDATE orders SET qrcode_url = $1, expires_at = NOW() + INTERVAL '30 minutes' WHERE order_id = $2 RETURNING user_id", [await uploadToCloud(req.file.buffer), req.body.orderId]);
@@ -3123,25 +3394,78 @@ app.post('/api/admin/order/upload_qrcode', adminAuth, upload.single('qrcode'), a
         res.json({ success: false });
     }
 });
-app.get('/api/pay/notify', async (req, res) => {
+app.all('/api/pay/notify', async (req, res) => {
+    let client;
     try {
-        if (!verifyPaySign(req.query)) {
+        // 兼容网关 GET/POST 通知，所有业务字段都必须在 RSA 签名校验通过后才使用。
+        const callbackParams = req.method === 'POST' ? { ...req.query, ...req.body } : req.query;
+        if (!verifyPaySign(callbackParams)) {
             return res.send('fail');
         }
-        if (req.query.trade_status !== 'TRADE_SUCCESS') {
+        if (callbackParams.trade_status !== 'TRADE_SUCCESS') {
             return res.send('success');
         }
-        const orderRes = await pool.query("SELECT * FROM orders WHERE order_id = $1 AND status = '待支付'", [req.query.out_trade_no]);
+        if (!PAY_MERCHANT_PID || String(callbackParams.pid || '') !== String(PAY_MERCHANT_PID)) {
+            console.warn('[支付回调拒绝] 商户号不匹配', { orderId: callbackParams.out_trade_no || null });
+            return res.send('fail');
+        }
+        const gatewayTradeNo = String(callbackParams.trade_no || '').trim();
+        if (!gatewayTradeNo || gatewayTradeNo.length > 200) {
+            console.warn('[支付回调拒绝] 缺少有效的网关交易号', { orderId: callbackParams.out_trade_no || null });
+            return res.send('fail');
+        }
+        const paymentTxId = `alipay:${gatewayTradeNo}`;
+        client = await pool.connect();
+        await client.query('BEGIN');
+        const orderRes = await client.query("SELECT * FROM orders WHERE order_id = $1 FOR UPDATE", [callbackParams.out_trade_no]);
         const order = orderRes.rows[0];
         if (!order) {
+            await client.query('ROLLBACK');
+            return res.send('fail');
+        }
+        if (order.status === '已支付') {
+            if (order.payment_tx_id && order.payment_tx_id !== paymentTxId) {
+                await client.query('ROLLBACK');
+                return res.send('fail');
+            }
+            await client.query('COMMIT');
             return res.send('success');
         }
-        await pool.query("UPDATE orders SET status = '已支付' WHERE order_id = $1", [order.order_id]);
-        if (order.product_name === '余额充值') {
-            await pool.query("UPDATE users SET balance = balance + $1 WHERE id = $2", [parseFloat(order.usdt_amount), order.user_id]);
-        } else {
-            await handleReferralBonus(order.user_id, parseFloat(order.usdt_amount), '消费');
+        if (order.status !== '待支付') {
+            await client.query('ROLLBACK');
+            return res.send('fail');
         }
+        if (String(order.payment_method || '').toLowerCase() !== 'alipay' || String(callbackParams.type || '').toLowerCase() !== 'alipay') {
+            await client.query('ROLLBACK');
+            console.warn('[支付回调拒绝] 支付方式不匹配', { orderId: order.order_id });
+            return res.send('fail');
+        }
+        const paidAmount = Number(callbackParams.money);
+        const expectedAmount = Number(order.cny_amount);
+        if (!Number.isFinite(paidAmount) || !Number.isFinite(expectedAmount) || Math.abs(paidAmount - expectedAmount) > 0.001) {
+            await client.query('ROLLBACK');
+            console.warn('[支付回调拒绝] 金额不匹配', {
+                orderId: order.order_id,
+                expected: expectedAmount,
+                received: paidAmount
+            });
+            return res.send('fail');
+        }
+        const duplicateTrade = await client.query("SELECT order_id FROM orders WHERE payment_tx_id = $1 AND order_id <> $2 LIMIT 1", [paymentTxId, order.order_id]);
+        if (duplicateTrade.rows.length > 0) {
+            await client.query('ROLLBACK');
+            console.warn('[支付回调拒绝] 网关交易号已被其他订单使用', { orderId: order.order_id });
+            return res.send('fail');
+        }
+        await client.query("UPDATE orders SET status = '已支付', payment_tx_id = $2 WHERE order_id = $1", [order.order_id, paymentTxId]);
+        if (order.product_name === '余额充值') {
+            const rechargeAmount = parseFloat(order.usdt_amount);
+            await client.query("UPDATE users SET balance = balance + $1 WHERE id = $2", [rechargeAmount, order.user_id]);
+            await logBalance(client, order.user_id, '余额充值', rechargeAmount, `支付宝订单 ${order.order_id} 自动回调到账`);
+        } else {
+            await applyReferralBonus(client, order.user_id, parseFloat(order.usdt_amount), '消费');
+        }
+        await client.query('COMMIT');
         const updatedOrderRes = await pool.query("SELECT * FROM orders WHERE order_id = $1", [order.order_id]);
         const updatedBalanceRes = await pool.query("SELECT balance FROM users WHERE id = $1", [order.user_id]);
         io.to(`user_${order.user_id}`).emit('order_update', {
@@ -3159,11 +3483,16 @@ app.get('/api/pay/notify', async (req, res) => {
             clearTimeout(orderData.timer);
             tgOrderMessages.delete(order.order_id);
         }
-        sendTgNotify(`✅ <b>支付宝/微信支付成功</b>\n👤 用户ID: ${order.user_id}\n📦 单号: <code>${order.order_id}</code>\n💰 订单应付: ${order.cny_amount}\n💵 实际到账: ${req.query.money}\n✨ 状态: 支付成功，金额已到账并已由系统自动确认！`);
+        sendTgNotify(`✅ <b>支付宝支付成功（系统已自动确认）</b>\n👤 用户ID: ${order.user_id}\n📦 单号: <code>${order.order_id}</code>\n💰 订单应付: ${order.cny_amount}\n💵 实际到账: ${callbackParams.money}\n✨ 状态: 已支付，无需管理员再次确认。`);
         res.send('success');
     } catch (e) {
+        if (client) {
+            try { await client.query('ROLLBACK'); } catch (rollbackError) {}
+        }
         console.error("支付回调处理失败:", e.message);
         res.send('fail');
+    } finally {
+        client?.release();
     }
 });
 app.post('/api/admin/update/announcement', adminAuth, async (req, res) => {
@@ -3191,7 +3520,7 @@ app.post('/api/admin/chat/recall', adminAuth, async (req, res) => {
         res.json({ success: false });
     }
 });
-app.post('/api/admin/product', adminAuth, upload.single('file'), async (req, res) => {
+app.post('/api/admin/product', adminAuth, upload.single('file'), validateUploadedImage, async (req, res) => {
     try {
         const id = Date.now();
         const imageUrl = req.file ? await uploadToCloud(req.file.buffer) : req.body.imageUrl || '';
@@ -3276,13 +3605,21 @@ app.post('/api/admin/confirm_pay', adminAuth, async (req, res) => {
         await client.query('BEGIN');
         const order = (await client.query("SELECT * FROM orders WHERE order_id = $1 FOR UPDATE", [req.body.orderId])).rows[0];
         if (!order) { await client.query('ROLLBACK'); return res.json({ success: false, msg: '订单不存在' }); }
+        if (String(order.payment_method || '').toLowerCase() === 'alipay') {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ success: false, msg: '支付宝订单只能由签名回调自动确认' });
+        }
+        if (String(order.payment_method || '').toLowerCase() !== 'usdt' || order.status !== '待审核') {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ success: false, msg: '只能人工确认已上传凭证的待审核 USDT 订单' });
+        }
         if (order.status !== '已支付') {
             await client.query("UPDATE orders SET status = '已支付' WHERE order_id = $1", [req.body.orderId]);
             if ((order.product_name ? order.product_name.trim() : '') === '余额充值') {
                 await client.query("UPDATE users SET balance = balance + $1 WHERE id = $2", [parseFloat(order.usdt_amount), order.user_id]);
                 await client.query("INSERT INTO balance_logs (user_id, type, amount, remark, balance_after) VALUES ($1, $2, $3, $4, $5)", [order.user_id, '余额充值', parseFloat(order.usdt_amount), `订单 ${req.body.orderId} 充值到账`, (await client.query("SELECT balance FROM users WHERE id = $1", [order.user_id])).rows[0]?.balance || 0]);
             } else {
-                try { await handleReferralBonus(order.user_id, parseFloat(order.usdt_amount), '消费'); } catch (bonusErr) {}
+                await applyReferralBonus(client, order.user_id, parseFloat(order.usdt_amount), '消费');
             }
           await client.query('COMMIT');
             const updatedOrderRes = await pool.query("SELECT * FROM orders WHERE order_id = $1", [req.body.orderId]);
@@ -3349,8 +3686,12 @@ app.post('/api/admin/order/cancel', adminAuth, async (req, res) => {
         await client.query('BEGIN');
         const order = (await client.query("SELECT * FROM orders WHERE order_id = $1 FOR UPDATE", [req.body.orderId])).rows[0];
         if (!order) throw new Error('订单不存在');
+        if (!['待支付', '待审核'].includes(order.status)) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ success: false, msg: '已支付或已结束订单不能直接取消' });
+        }
         await client.query("UPDATE orders SET status = '已取消' WHERE order_id = $1", [req.body.orderId]);
-        if (parseFloat(order.balance_deducted) > 0 && order.status === '待支付') {
+        if (parseFloat(order.balance_deducted) > 0 && ['待支付', '待审核'].includes(order.status)) {
             await client.query('UPDATE users SET balance = balance + $1 WHERE id = $2', [parseFloat(order.balance_deducted), order.user_id]);
             await logBalance(client, order.user_id, '订单取消', parseFloat(order.balance_deducted), `管理员取消订单 ${req.body.orderId} 退回余额`);
         }
@@ -3380,7 +3721,7 @@ async function startUSDTHTTPPolling() {
     if (usdtPollingTimer) return;
     try {
         const oldestOrderRes = await pool.query(
-            "SELECT created_at FROM orders WHERE status = '待支付' AND (payment_method = 'USDT' OR payment_method = 'usdt') ORDER BY created_at ASC LIMIT 1"
+            "SELECT created_at FROM orders WHERE status IN ('待支付', '待审核') AND LOWER(payment_method) = 'usdt' ORDER BY created_at ASC LIMIT 1"
         );
         if (oldestOrderRes.rows.length > 0) {
             minTimestamp = new Date(oldestOrderRes.rows[0].created_at).getTime() - 60000;
@@ -3394,7 +3735,7 @@ async function startUSDTHTTPPolling() {
         if (usdtPollInFlight) return;
         usdtPollInFlight = true;
         try {
-            const pendingRes = await pool.query("SELECT COUNT(*) as count FROM orders WHERE status = '待支付' AND (payment_method = 'USDT' OR payment_method = 'usdt')");
+            const pendingRes = await pool.query("SELECT COUNT(*) as count FROM orders WHERE status IN ('待支付', '待审核') AND LOWER(payment_method) = 'usdt'");
             if (parseInt(pendingRes.rows[0].count) === 0) {
                 clearInterval(usdtPollingTimer);
                 usdtPollingTimer = null;
@@ -3416,28 +3757,62 @@ async function startUSDTHTTPPolling() {
                     if (tx.block_timestamp > maxTime) {
                         maxTime = tx.block_timestamp;
                     }
-                    if (processedTxIds.has(tx.transaction_id)) continue;
-                    processedTxIds.add(tx.transaction_id);
-                    if (processedTxIds.size > 2000) {
-                        const iterator = processedTxIds.keys();
-                        processedTxIds.delete(iterator.next().value);
-                    }
+                    const chainTxId = String(tx.transaction_id || '').trim();
+                    if (!chainTxId || processedTxIds.has(chainTxId) || tx.confirmed === false) continue;
                     if (tx.to !== systemWallet) continue;
-                    const amount = (parseFloat(tx.value) / 1000000).toFixed(2);
-                    const orderRes = await pool.query("SELECT * FROM orders WHERE status = '待支付' AND usdt_amount = $1 ORDER BY created_at ASC LIMIT 1", [amount]);
-                    const order = orderRes.rows[0];
-                    if (!order) continue;
-                    const order_id = order.order_id;
-                    await pool.query("UPDATE orders SET status = '已支付' WHERE order_id = $1", [order_id]);
-                    if (order.product_name === '余额充值') {
-                        await pool.query("UPDATE users SET balance = balance + $1 WHERE id = $2", [parseFloat(amount), order.user_id]);
-                    } else {
-                        const extraAmount = parseFloat(amount) - parseFloat(order.usdt_amount);
-                        if (extraAmount > 0) {
-                            await pool.query("UPDATE users SET balance = balance + $1 WHERE id = $2", [extraAmount, order.user_id]);
+                    const rawAmount = Number(tx.value) / 1000000;
+                    if (!Number.isFinite(rawAmount) || rawAmount <= 0) continue;
+                    const amount = rawAmount.toFixed(2);
+                    const paymentTxId = `usdt:${chainTxId}`;
+                    let paymentClient;
+                    let order;
+                    try {
+                        paymentClient = await pool.connect();
+                        await paymentClient.query('BEGIN');
+                        const usedTx = await paymentClient.query("SELECT order_id FROM orders WHERE payment_tx_id = $1 LIMIT 1", [paymentTxId]);
+                        if (usedTx.rows.length > 0) {
+                            await paymentClient.query('COMMIT');
+                            processedTxIds.add(chainTxId);
+                            continue;
                         }
-                        await handleReferralBonus(order.user_id, parseFloat(order.usdt_amount), '消费');
+                        const txTime = new Date(Number(tx.block_timestamp));
+                        const orderRes = await paymentClient.query(
+                            "SELECT * FROM orders WHERE status IN ('待支付', '待审核') AND LOWER(payment_method) = 'usdt' AND usdt_amount = $1 AND created_at <= $2::timestamptz + INTERVAL '2 minutes' ORDER BY created_at ASC FOR UPDATE SKIP LOCKED LIMIT 1",
+                            [amount, txTime.toISOString()]
+                        );
+                        order = orderRes.rows[0];
+                        if (!order) {
+                            await paymentClient.query('ROLLBACK');
+                            continue;
+                        }
+                        await paymentClient.query("UPDATE orders SET status = '已支付', payment_tx_id = $2 WHERE order_id = $1", [order.order_id, paymentTxId]);
+                        if (order.product_name === '余额充值') {
+                            const rechargeAmount = parseFloat(order.usdt_amount);
+                            await paymentClient.query("UPDATE users SET balance = balance + $1 WHERE id = $2", [rechargeAmount, order.user_id]);
+                            await logBalance(paymentClient, order.user_id, '余额充值', rechargeAmount, `USDT 交易 ${chainTxId} 自动到账`);
+                        } else {
+                            const extraAmount = rawAmount - parseFloat(order.usdt_amount);
+                            if (extraAmount > 0.000001) {
+                                await paymentClient.query("UPDATE users SET balance = balance + $1 WHERE id = $2", [extraAmount, order.user_id]);
+                                await logBalance(paymentClient, order.user_id, '支付多余退回', extraAmount, `USDT 订单 ${order.order_id} 多付退回`);
+                            }
+                            await applyReferralBonus(paymentClient, order.user_id, parseFloat(order.usdt_amount), '消费');
+                        }
+                        await paymentClient.query('COMMIT');
+                        processedTxIds.add(chainTxId);
+                        if (processedTxIds.size > 2000) {
+                            const iterator = processedTxIds.keys();
+                            processedTxIds.delete(iterator.next().value);
+                        }
+                    } catch (paymentError) {
+                        if (paymentClient) {
+                            try { await paymentClient.query('ROLLBACK'); } catch (rollbackError) {}
+                        }
+                        throw paymentError;
+                    } finally {
+                        paymentClient?.release();
                     }
+                    const order_id = order.order_id;
                     const updatedOrderRes = await pool.query("SELECT * FROM orders WHERE order_id = $1", [order_id]);
                     const updatedBalanceRes = await pool.query("SELECT balance FROM users WHERE id = $1", [order.user_id]);
                     io.to(`user_${order.user_id}`).emit('order_update', {
@@ -3472,23 +3847,46 @@ async function startUSDTHTTPPolling() {
 // ==========================================
 // [7] Socket.IO 融合逻辑
 // ==========================================
+function requireSocketAdmin(socket) {
+    if (socket.data?.isAdmin === true) return true;
+    socket.emit('auth_error', { message: 'Unauthorized' });
+    return false;
+}
+io.use(async (socket, next) => {
+    const token = socket.handshake.auth?.token;
+    // 管理端会在连接后单独登录；游客连接只能接收公开广播，不允许加入用户房间。
+    if (!token) return next();
+    const userId = verifyUserSessionToken(token);
+    if (!userId) return next(new Error('Unauthorized'));
+    try {
+        const exists = await pool.query('SELECT 1 FROM users WHERE id = $1 LIMIT 1', [userId]);
+        if (exists.rows.length === 0) return next(new Error('Unauthorized'));
+        socket.data.userId = userId;
+        return next();
+    } catch (error) {
+        console.error('[Socket 会话校验失败]', serializeError(error));
+        return next(new Error('Service unavailable'));
+    }
+});
 io.on('connection', (socket) => {
+    const socketUserId = socket.data.userId || null;
     socket.on('join_room', (room) => {
-        if (room !== 'admin_room') {
-            socket.join(room);
-        }
+        if (!socket.data.userId) return socket.emit('auth_error', { message: '请先登录' });
+        const allowedRooms = new Set([`user_${socket.data.userId}`, `hr_user_${socket.data.userId}`]);
+        if (!allowedRooms.has(String(room))) return socket.emit('auth_error', { message: '无权加入该会话' });
+        socket.join(String(room));
     });
-    const { userId, bossId } = socket.handshake.query;
-    if (userId) {
-        socket.join(userId);
-        socket.userId = userId;
-        onlineUsers.add(userId);
-        io.to('admin_room').emit('user_status_change', { userId, online: true });
+    const { bossId } = socket.handshake.query;
+    if (socketUserId) {
+        socket.join(socketUserId);
+        socket.userId = socketUserId;
+        onlineUsers.add(socketUserId);
+        io.to('admin_room').emit('user_status_change', { userId: socketUserId, online: true });
         if (!socket._hasSentUnread) {
             socket._hasSentUnread = true;
-            prisma.message.findMany({ where: { userId: userId, isFromUser: false, status: { not: 'read' } } })
+            prisma.message.findMany({ where: { userId: socketUserId, isFromUser: false, status: { not: 'read' } } })
                 .then(msgs => msgs.forEach(msg => socket.emit('receive_message', msg))).catch(e=>{});
-            pool.query("SELECT * FROM chats WHERE session_id = $1 AND sender = 'admin' AND is_read = FALSE", [`user_${userId}`])
+            pool.query("SELECT * FROM chats WHERE session_id = $1 AND sender = 'admin' AND is_read = FALSE", [`user_${socketUserId}`])
                 .then(chats => chats.rows.forEach(chat => socket.emit('new_message', chat))).catch(e=>{});
         }
     }
@@ -3499,15 +3897,20 @@ io.on('connection', (socket) => {
     socket.on('join', async ({ userId, isAdmin, bossId, token }) => {
         if (isAdmin) {
             // 校验 Token，防止伪造管理员身份窃听全站聊天
-            if (token === process.env.ADMIN_TOKEN || token === await getSetting('admin_password')) {
+            if (verifyAdminSessionToken(token)) {
+                socket.data.isAdmin = true;
                 socket.join('admin_room');
                 socket.emit('online_users_list', Array.from(onlineUsers));
             } else {
                 socket.emit('force_logout');
             }
         } else if (userId) {
+            if (!socket.data.userId || String(userId) !== socket.data.userId) {
+                socket.emit('force_logout');
+                return;
+            }
             try {
-                const existingUser = await prisma.user.findUnique({ where: { id: userId } });
+                const existingUser = await prisma.user.findUnique({ where: { id: socket.data.userId } });
                 if (existingUser && existingUser.isBlocked) {
                     socket.emit('force_logout_blocked');
                     socket.disconnect(true);
@@ -3515,27 +3918,27 @@ io.on('connection', (socket) => {
                 }
                 if (!existingUser) {
                     if (bossId && bossId !== 'SystemRestore') {
-                        await prisma.user.create({ data: { id: userId, bossId: bossId } });
-                        socket.join(userId);
-                        socket.emit('receive_message', await prisma.message.create({ data: { userId, content: WELCOME_MESSAGE, type: 'text', isFromUser: false, status: 'sent' } }));
+                        await prisma.user.create({ data: { id: socket.data.userId, bossId: bossId } });
+                        socket.join(socket.data.userId);
+                        socket.emit('receive_message', await prisma.message.create({ data: { userId: socket.data.userId, content: WELCOME_MESSAGE, type: 'text', isFromUser: false, status: 'sent' } }));
                     } else {
                         socket.emit('force_logout');
                         return;
                     }
                 } else {
-                    socket.join(userId);
+                    socket.join(socket.data.userId);
                     if (bossId && bossId !== 'SystemRestore' && existingUser.bossId !== bossId) {
-                        await prisma.user.update({ where: { id: userId }, data: { bossId } });
+                        await prisma.user.update({ where: { id: socket.data.userId }, data: { bossId } });
                     }
                 }
-                socket.userId = userId;
-                onlineUsers.add(userId);
-                io.to('admin_room').emit('user_status_change', { userId, online: true });
+                socket.userId = socket.data.userId;
+                onlineUsers.add(socket.data.userId);
+                io.to('admin_room').emit('user_status_change', { userId: socket.data.userId, online: true });
                 if (!socket._hasSentUnread) {
                     socket._hasSentUnread = true;
-                    const unreadMsgs = await prisma.message.findMany({ where: { userId: userId, isFromUser: false, status: { not: 'read' } } });
+                    const unreadMsgs = await prisma.message.findMany({ where: { userId: socket.data.userId, isFromUser: false, status: { not: 'read' } } });
                     unreadMsgs.forEach(msg => socket.emit('receive_message', msg));
-                    const unreadChats = await pool.query("SELECT * FROM chats WHERE session_id = $1 AND sender = 'admin' AND is_read = FALSE", [`user_${userId}`]);
+                    const unreadChats = await pool.query("SELECT * FROM chats WHERE session_id = $1 AND sender = 'admin' AND is_read = FALSE", [`user_${socket.data.userId}`]);
                     unreadChats.rows.forEach(chat => socket.emit('new_message', chat));
                 }
             } catch (e) {
@@ -3555,24 +3958,27 @@ io.on('connection', (socket) => {
         if (targetId === 'admin') {
             if (socket.userId) io.to('admin_room').emit('user_typing', { userId: socket.userId, isTyping });
         } else {
+            if (!requireSocketAdmin(socket)) return;
             io.to(targetId).emit('display_typing', { isTyping });
         }
     });
     socket.on('mark_read', async ({ userId, isAdmin }) => {
         try {
             if (isAdmin) {
+                if (!requireSocketAdmin(socket)) return;
                 await prisma.message.updateMany({ where: { userId, isFromUser: true, status: { not: 'read' } }, data: { status: 'read' } });
                 io.to(userId).emit('messages_read_update');
                 io.to('admin_room').emit('admin_messages_read_sync', { userId });
             } else {
-                await prisma.message.updateMany({ where: { userId, isFromUser: false, status: { not: 'read' } }, data: { status: 'read' } });
-                io.to('admin_room').emit('admin_messages_read', { userId });
+                if (!socket.data.userId || String(userId) !== socket.data.userId) return;
+                await prisma.message.updateMany({ where: { userId: socket.data.userId, isFromUser: false, status: { not: 'read' } }, data: { status: 'read' } });
+                io.to('admin_room').emit('admin_messages_read', { userId: socket.data.userId });
             }
         } catch (e) {}
     });
     socket.on('send_message', async (data) => {
         const { userId, content, type, bossId, tempId } = data;
-        if (!userId) {
+        if (!socket.data.userId || String(userId) !== socket.data.userId) {
             socket.emit('force_logout');
             return;
         }
@@ -3619,6 +4025,7 @@ io.on('connection', (socket) => {
         }
     });
     socket.on('admin_reply', async ({ targetUserId, content, type, tempId }) => {
+        if (!requireSocketAdmin(socket)) return;
         try {
             let finalType = type || (content.startsWith('data:image') ? 'image' : 'text');
             const userExists = await prisma.user.findUnique({ where: { id: targetUserId } });
@@ -3642,12 +4049,14 @@ io.on('connection', (socket) => {
         } catch (e) {}
     });
     socket.on('admin_toggle_mute', async ({ userId, isMuted }) => {
+        if (!requireSocketAdmin(socket)) return;
         try {
             await prisma.user.update({ where: { id: userId }, data: { isMuted } });
             io.to('admin_room').emit('user_status_update', { userId, isMuted });
         } catch (e) {}
     });
     socket.on('admin_delete_message', async ({ messageId, userId }) => {
+        if (!requireSocketAdmin(socket)) return;
         try {
             await prisma.message.delete({ where: { id: !isNaN(Number(messageId)) ? Number(messageId) : messageId } });
             io.to('admin_room').emit('message_deleted', { messageId, userId });
@@ -3655,6 +4064,7 @@ io.on('connection', (socket) => {
         } catch (e) {}
     });
     socket.on('admin_clear_user_data', async ({ userId }) => {
+        if (!requireSocketAdmin(socket)) return;
         try {
             await prisma.message.deleteMany({ where: { userId } });
             await prisma.user.delete({ where: { id: userId } });
@@ -3663,6 +4073,7 @@ io.on('connection', (socket) => {
         } catch (e) {}
     });
     socket.on('admin_block_user', async ({ userId }) => {
+        if (!requireSocketAdmin(socket)) return;
         try {
             await prisma.message.deleteMany({ where: { userId } });
             await pool.query("DELETE FROM push_subscriptions WHERE user_id = $1", [String(userId)]);
@@ -3675,6 +4086,7 @@ io.on('connection', (socket) => {
         } catch (e) {}
     });
     socket.on('admin_merge_user', async ({ oldId, newId }) => {
+        if (!requireSocketAdmin(socket)) return;
         try {
             const oldUser = await prisma.user.findUnique({ where: { id: oldId } });
             if (!oldUser) {
@@ -3701,9 +4113,9 @@ setInterval(async () => {
     let client;
     try {
         client = await pool.connect();
-        const timeoutOrders = await client.query(`SELECT order_id, product_name, balance_deducted, user_id FROM orders WHERE status = '待支付' AND qrcode_url IS NULL AND created_at < NOW() - INTERVAL '30 minutes'`);
+        await client.query('BEGIN');
+        const timeoutOrders = await client.query(`SELECT order_id, product_name, balance_deducted, user_id FROM orders WHERE status = '待支付' AND COALESCE(expires_at, created_at + INTERVAL '30 minutes') < NOW() FOR UPDATE SKIP LOCKED`);
         if (timeoutOrders.rowCount > 0) {
-            await client.query('BEGIN');
             for (const order of timeoutOrders.rows) {
                 await client.query("UPDATE orders SET status = '已关闭' WHERE order_id = $1", [order.order_id]);
                 if (parseFloat(order.balance_deducted) > 0) {
@@ -3713,8 +4125,8 @@ setInterval(async () => {
                 const fullOrderRes = await client.query(`SELECT o.*, u.contact as user_contact, u.id as user_display_id FROM orders o LEFT JOIN users u ON o.user_id = u.id WHERE o.order_id = $1`, [order.order_id]);
                 notifyAdminUpdate('order', { payload: fullOrderRes.rows[0] });
             }
-            await client.query('COMMIT');
         }
+        await client.query('COMMIT');
     } catch (e) {
         console.error('[订单清理任务错误]', serializeError(e));
         if (client) {
@@ -3727,7 +4139,7 @@ setInterval(async () => {
     } finally {
         client?.release();
     }
-}, 30 * 60 * 1000);
+}, 5 * 60 * 1000);
 cron.schedule('0 0 * * *', async () => {
     try {
         await pool.query("DELETE FROM coupons WHERE expires_at < NOW()");
