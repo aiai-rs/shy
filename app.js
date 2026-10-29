@@ -132,7 +132,7 @@ const SITE_OWNERS = Object.freeze([
         domain: 'xaw88.com',
         bossName: '豪哥',
         // Render 环境变量只填写用户名，不要包含 @；未配置时仍会发到管理群，但不会错误 @ 其他老板。
-        telegramUsername: String(process.env.HAOGE_TELEGRAM_USERNAME || '').trim().replace(/^@/, '')
+        telegramUsername: String(process.env.HAOGE_TELEGRAM_USERNAME || 'r6363').trim().replace(/^@/, '')
     },
     { key: 'boss', domain: 'xaw888.com', bossName: 'Boss', telegramUsername: 'rrii8' }
 ]);
@@ -304,7 +304,14 @@ const ZL_LINKS = { '租车': 'https://hy88.netlify.app', '大飞': 'https://hy88
 const ZJ_LINKS = { '租车': 'https://zj88.netlify.app', '大飞': 'https://zj88.netlify.app', '走药': 'https://zj88.netlify.app', '背债': 'https://zj88.netlify.app' };
 // Express 基础中间件
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, message: { success: false, msg: "尝试次数过多，请15分钟后再试" }, standardHeaders: true, legacyHeaders: false });
-const registerLimiter = rateLimit({ windowMs: 60 * 60 * 1000, max: 10, message: { success: false, msg: "注册过于频繁，请稍后再试" }, standardHeaders: true, legacyHeaders: false });
+const registerLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000,
+    max: 30,
+    skipFailedRequests: true,
+    message: { success: false, msg: "注册过于频繁，请稍后再试" },
+    standardHeaders: true,
+    legacyHeaders: false
+});
 const apiLimiter = rateLimit({ windowMs: 1 * 60 * 1000, max: 200, standardHeaders: true, legacyHeaders: false });
 const rawUploadLimiter = rateLimit({ windowMs: 10 * 60 * 1000, max: 20, message: { code: 1, msg: '上传过于频繁，请稍后再试' }, standardHeaders: true, legacyHeaders: false });
 app.use(cors({
@@ -2377,8 +2384,8 @@ app.post('/api/user/register', registerLimiter, async (req, res) => {
     const { contact, password, inviteCode, source } = req.body;
     try {
         if (typeof contact !== 'string' || contact.trim().length < 3 || contact.trim().length > 120) return res.status(400).json({ success: false, msg: '联系方式格式不正确' });
-        if (typeof password !== 'string' || password.length < 8 || password.length > 128) return res.status(400).json({ success: false, msg: '密码长度需为8至128位' });
-        if ((await pool.query('SELECT id FROM users WHERE contact = $1', [contact])).rows.length > 0) return res.json({ success: false, msg: '用户已存在' });
+        if (typeof password !== 'string' || password.length < 6 || password.length > 128) return res.status(400).json({ success: false, msg: '密码长度需为6至128位' });
+        if ((await pool.query('SELECT id FROM users WHERE contact = $1', [contact])).rows.length > 0) return res.status(409).json({ success: false, msg: '用户已存在' });
         let id = null;
         for (let attempt = 0; attempt < 10 && id === null; attempt++) {
             const candidate = crypto.randomInt(100000000, 1000000000);
@@ -2386,6 +2393,7 @@ app.post('/api/user/register', registerLimiter, async (req, res) => {
             if (exists.rows.length === 0) id = candidate;
         }
         if (id === null) throw new Error('无法生成用户编号');
+        const sessionToken = createUserSessionToken(id);
         const hashedPassword = await bcrypt.hash(password, 12);
         const myInviteCode = Math.random().toString(36).substring(2, 6).toUpperCase();
         let inviterId = null;
@@ -2396,8 +2404,9 @@ app.post('/api/user/register', registerLimiter, async (req, res) => {
         await pool.query('INSERT INTO users (id, contact, password, balance, invite_code, invited_by, source) VALUES ($1, $2, $3, 0, $4, $5, $6)', [id, contact, hashedPassword, myInviteCode, inviterId, getSiteOwner(source).domain]);
         const newUserRes = await pool.query('SELECT *, false as has_order FROM users WHERE id = $1', [id]);
         notifyAdminUpdate('user_add', { payload: newUserRes.rows[0] });
-        res.json({ success: true, isNew: true, userId: id, uid: id, balance: 0, inviteCode: myInviteCode, token: createUserSessionToken(id) });
+        res.json({ success: true, isNew: true, userId: id, uid: id, balance: 0, inviteCode: myInviteCode, token: sessionToken });
     } catch (e) {
+        console.error('[用户注册失败]', serializeError(e));
         res.status(500).json({ success: false, msg: '注册失败，请稍后重试' });
     }
 });
