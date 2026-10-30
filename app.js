@@ -122,7 +122,7 @@ const allowedOrigins = [
     'https://hy88.pro',
     'https://huiying8.netlify.app',
     'https://hthf.netlify.app',
-    'http://127.0.0.1:5500',
+    'http://127.0.0.1:3000',
     'http://localhost:5500'
 ];
 const SITE_OWNERS = Object.freeze([
