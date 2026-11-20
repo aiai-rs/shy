@@ -4,7 +4,8 @@
   "description": "Unified system for chat, store, and group management",
   "main": "app.js",
   "scripts": {
-    "start": "node app.js"
+    "start": "node app.js",
+    "test": "node --test"
   },
   "dependencies": {
     "@prisma/client": "^5.10.2",

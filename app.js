@@ -163,17 +163,34 @@ const io = new Server(server, {
 const PORT = process.env.PORT || 10000;
 const BOT_TOKEN = process.env.BOT_TOKEN;
 // --- 客服系统与 Bot 变量 ---
-const ALLOWED_GROUP_ID = process.env.ALLOWED_GROUP_ID;
+const ALLOWED_GROUP_ID = process.env.ALLOWED_GROUP_ID?.trim();
 const ALLOWED_BOT_USERS = (process.env.ALLOWED_BOT_USERS || '')
     .split(',')
     .map(id => Number(id.trim()))
     .filter(id => !isNaN(id));
-const GROUP_CHAT_IDS = [
+const DEFAULT_GROUP_CHAT_IDS = [
     -1003354803364, -1003381368112, -1003308598858, -1003368574609, -1003286063197,
-    -1003378109615, -1003293673373, -1003203365614, -1000000000009, -1000000000010
+    -1003378109615, -1003293673373, -1003203365614, -1000000000009, -1000000000010,
+    // 新增的十个群，保留 Telegram 返回的完整负数 ID。
+    -5226016076, -5491654794, -5404416503, -5412404896, -5284646576,
+    -5220763076, -5390136680, -5205876648, -5351887171, -5597761544
 ];
+// 新增群在 GROUP_CHAT_IDS 环境变量填写完整负数 ID；普通群和超级群均可，不要手动添加 -100 前缀。
+function parseGroupChatIds(value = '') {
+    return value.split(/[,\s，]+/).filter(Boolean).map(id => {
+        const chatId = Number(id);
+        if (!/^-[1-9]\d*$/.test(id) || !Number.isSafeInteger(chatId)) {
+            throw new Error(`GROUP_CHAT_IDS 包含无效群 ID：${id}。请填写完整负数 ID，多个 ID 用逗号分隔。`);
+        }
+        return chatId;
+    });
+}
+const GROUP_CHAT_IDS = [...new Set([
+    ...DEFAULT_GROUP_CHAT_IDS,
+    ...parseGroupChatIds(process.env.GROUP_CHAT_IDS)
+])];
 const BACKUP_GROUP_ID = -1003293673373;
-const TG_ADMIN_GROUP_ID = process.env.TG_ADMIN_GROUP_ID;
+const TG_ADMIN_GROUP_ID = process.env.TG_ADMIN_GROUP_ID?.trim();
 // --- 商城系统变量 ---
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -997,10 +1014,13 @@ bot.on('new_chat_members', async (ctx) => {
         clearPendingAuthorizationTimer(ctx.chat.id, m.id);
         clearPendingTravelForUser(ctx.chat.id, m.id);
         saveAuth();
-        try {
-            await bot.telegram.restrictChatMember(ctx.chat.id, m.id, { permissions: { can_send_messages: false } });
-        } catch (e) {
-            console.error("禁言用户失败:", e.message);
+        // Telegram 仅允许超级群单独禁言；普通群由现有消息处理器删除未授权消息。
+        if (ctx.chat.type === 'supergroup') {
+            try {
+                await bot.telegram.restrictChatMember(ctx.chat.id, m.id, { permissions: { can_send_messages: false } });
+            } catch (e) {
+                console.error("禁言用户失败:", e.message);
+            }
         }
         const warning = await ctx.reply(t(ctx.chat.id, 'welcome_user', { name: m.first_name, username: m.username ? `@${m.username}` : '' }));
         warningMessages.set(makeAuthorizationMessageKey(ctx.chat.id, warning.message_id), {
@@ -1150,8 +1170,9 @@ bot.command('scbq', async (ctx) => {
     if (!GROUP_CHAT_IDS.includes(ctx.chat.id)) return;
     if (!await isAdmin(ctx.chat.id, ctx.from.id)) return ctx.reply("❌ 🔒无权限！只限管理员使用。");
     try {
-        await ctx.reply("🔒 ⚠️ 本群已锁！ \n✅ 已保留聊天记录和相关日志。\n🚫 所有非管理员用户已被禁言。", { parse_mode: 'Markdown' });
         await bot.telegram.setChatPermissions(ctx.chat.id, { can_send_messages: false });
+        await ctx.reply("🔒 ⚠️ 本群已锁！ \n✅ 已保留聊天记录和相关日志。\n🚫 所有非管理员用户已被禁言。", { parse_mode: 'Markdown' });
+        if (ctx.chat.type !== 'supergroup') return;
         const chatId = String(ctx.chat.id);
         for (let key of authorizedUsers.keys()) {
             if (key.startsWith(`${chatId}_`)) {
@@ -1234,10 +1255,11 @@ bot.hears('/解锁', async (ctx) => {
     if (!GROUP_CHAT_IDS.includes(ctx.chat.id)) return;
     if (!await isAdmin(ctx.chat.id, ctx.from.id)) return ctx.reply("❌ 🔒无权限！只限管理员使用。");
     try {
-        await ctx.reply("🔓 ✨ **本群已解锁！** \n✅ 用户现在可以正常发言了。", { parse_mode: 'Markdown' });
         await bot.telegram.setChatPermissions(ctx.chat.id, {
             can_send_messages: true, can_send_photos: true, can_send_videos: true, can_send_other_messages: true, can_add_web_page_previews: true, can_invite_users: true
         });
+        await ctx.reply("🔓 ✨ **本群已解锁！** \n✅ 用户现在可以正常发言了。", { parse_mode: 'Markdown' });
+        if (ctx.chat.type !== 'supergroup') return;
         const chatId = String(ctx.chat.id);
         for (let key of authorizedUsers.keys()) {
             if (key.startsWith(`${chatId}_`)) {
@@ -1597,7 +1619,7 @@ bot.on('text', async (ctx, next) => {
                         return ctx.reply("❌ 目标用户当前已不在本群，无法授权。");
                     }
                                                            try {
-                        if (member.status !== 'administrator' && member.status !== 'creator') {
+                        if (ctx.chat.type === 'supergroup' && member.status !== 'administrator' && member.status !== 'creator') {
                             await bot.telegram.restrictChatMember(ctx.chat.id, target.userId, {
                                 use_independent_chat_permissions: true,
                                 permissions: {
@@ -1632,7 +1654,10 @@ bot.on('text', async (ctx, next) => {
                                       if (storedTarget) {
                         warningMessages.delete(replyStateKey);
                     }
-                    await ctx.reply(`✅ ${targetMention} <b>已完成授权</b>\n━━━━━━━━━━━━━━\n\n🪪 当前身份：<b>${roleName}</b>\n🛡️ 授权人：${authorizerMention}\n🕒 授权时间：<code>${authorizationTime}</code>\n\n🔓 禁言已解除，现在你可以正常发言。${travelReminder}\n\n🚀 <b>汇盈国际 · 专业 · 安全 · 可靠</b>`, { parse_mode: 'HTML' });
+                    const authorizationResult = ctx.chat.type === 'supergroup'
+                        ? '🔓 禁言已解除，现在你可以正常发言。'
+                        : '✅ 授权已生效，现在你可以正常发言。\nℹ️ 普通群不支持单独禁言；未授权消息仍会由机器人删除。';
+                    await ctx.reply(`✅ ${targetMention} <b>已完成授权</b>\n━━━━━━━━━━━━━━\n\n🪪 当前身份：<b>${roleName}</b>\n🛡️ 授权人：${authorizerMention}\n🕒 授权时间：<code>${authorizationTime}</code>\n\n${authorizationResult}${travelReminder}\n\n🚀 <b>汇盈国际 · 专业 · 安全 · 可靠</b>`, { parse_mode: 'HTML' });
                     let promptMsg;
                     try {
                           promptMsg = await ctx.reply(`<b>🚦 ${role === 'agent' ? '请选择你兄弟的出行方式' : '请选择你的出行方式'}</b>\n\n👤 ${targetMention}\n请点击下方按钮完成选择：`, {
@@ -1646,7 +1671,7 @@ bot.on('text', async (ctx, next) => {
                         });
                     } catch (e) {
                         console.error('发送出行方式失败:', e.message);
-                        return ctx.reply("⚠️ 用户已经授权并解除禁言，但出行方式发送失败，请重新回复授权后再试。");
+                        return ctx.reply("⚠️ 用户已经授权，但出行方式发送失败，请重新回复授权后再试。");
                     }
                     pendingTravelAuthorizations.set(makeAuthorizationMessageKey(ctx.chat.id, promptMsg.message_id), {
                         chatId: String(ctx.chat.id),
